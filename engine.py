@@ -27,7 +27,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -140,7 +140,6 @@ class Result:
     rows: list[tuple]
     truncated: bool
     elapsed: float
-    notes: list[str] = field(default_factory=list)
 
 
 def _interruptible(conn, timeout_s: float):
@@ -234,6 +233,7 @@ def export(sources: list[dict], sql: str, out: Path, fmt: str, *, cap: int, time
         try:
             got = conn.execute(stmt).fetchone()
         except Exception as e:  # noqa: BLE001
+            tmp.unlink(missing_ok=True)  # a failed/interrupted COPY leaves no half-written file
             if _is_interrupt(e):
                 raise QueryError(f"Export timed out after {timeout_s:g}s.") from None
             raise QueryError(_explain(e)) from None

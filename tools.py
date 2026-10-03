@@ -233,7 +233,7 @@ def data_profile(source: str) -> str:
     def g(row, k):
         return row[idx[k]] if k in idx else None
 
-    rows, extra = [], []
+    rows = []
     for r in summ.rows:
         col, typ = g(r, "column_name"), str(g(r, "column_type"))
         count, nullp, uniq = g(r, "count"), g(r, "null_percentage"), g(r, "approx_unique")
@@ -283,7 +283,6 @@ def data_profile(source: str) -> str:
         head
         + "\n"
         + engine.md_table(["column", "type", "nulls", "≈distinct", "min", "max", "stats", "IQR outliers"], rows, 70)
-        + "".join(extra)
     )
 
 
@@ -352,9 +351,38 @@ def build_spec(spec_in, title: str, columns: list[str], rows: list[tuple]) -> tu
     return spec, notes
 
 
-def _fields(node) -> set[str]:
+def _derived(transforms) -> set[str] | None:
+    """The field names a ``transform`` list creates (every ``as``: calculate, aggregate,
+    joinaggregate, window, bin, timeUnit, fold, lookup, …), or None when it creates names we can't
+    know up front (``pivot`` names columns after DATA values)."""
+    out: set[str] = set()
+    stack = list(transforms) if isinstance(transforms, list) else []
+    while stack:
+        t = stack.pop()
+        if isinstance(t, list):
+            stack.extend(t)
+            continue
+        if not isinstance(t, dict):
+            continue
+        if "pivot" in t:
+            return None
+        for k, v in t.items():
+            if k == "as":
+                out |= {v} if isinstance(v, str) else {x for x in v if isinstance(x, str)} if isinstance(v, list) else set()
+            elif isinstance(v, (list, dict)):
+                stack.append(v)
+    return out
+
+
+def _fields(node, derived: frozenset = frozenset()) -> set[str]:
+    """Fields the spec encodes that must come from the query — minus what a transform derives,
+    on this node or an ancestor (a layer inherits its parent's transforms)."""
     out: set[str] = set()
     if isinstance(node, dict):
+        made = _derived(node.get("transform"))
+        if made is None:  # a pivot: its columns are data-dependent — don't second-guess the node
+            return set()
+        derived = derived | frozenset(made)
         enc = node.get("encoding")
         if isinstance(enc, dict):
             for ch in enc.values():
@@ -363,12 +391,11 @@ def _fields(node) -> set[str]:
                         out.add(c["field"].split(".")[0])
         for k, v in node.items():
             if k not in ("data", "encoding", "transform"):
-                out |= _fields(v)
-        if "transform" in node:  # derived fields — don't second-guess them
-            return set()
+                out |= _fields(v, derived)
+        out -= derived
     elif isinstance(node, list):
         for x in node:
-            out |= _fields(x)
+            out |= _fields(x, derived)
     return out
 
 
