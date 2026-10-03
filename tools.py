@@ -368,7 +368,13 @@ def _derived(transforms) -> set[str] | None:
             return None
         for k, v in t.items():
             if k == "as":
-                out |= {v} if isinstance(v, str) else {x for x in v if isinstance(x, str)} if isinstance(v, list) else set()
+                out |= (
+                    {v}
+                    if isinstance(v, str)
+                    else {x for x in v if isinstance(x, str)}
+                    if isinstance(v, list)
+                    else set()
+                )
             elif isinstance(v, (list, dict)):
                 stack.append(v)
     return out
