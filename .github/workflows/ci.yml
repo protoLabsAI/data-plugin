@@ -1,0 +1,34 @@
+name: CI
+
+# Lint + test the plugin, host-free. Runs on the org's Namespace Linux profile when the
+# NSC_RUNNER variable names one, else on a GitHub-hosted ubuntu runner.
+#
+# Dependencies are PINNED: uv.lock is the source of truth and `uv sync --frozen` installs exactly
+# it (a stale lock fails here instead of resolving something new). After changing pyproject.toml,
+# run `uv lock` and commit uv.lock.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ vars.NSC_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install locked deps
+        run: uv sync --frozen --python 3.12
+
+      - name: Lint
+        run: uv run --frozen ruff check . && uv run --frozen ruff format --check .
+
+      - name: Test
+        # Includes the dependency licence check (tests/test_plugin.py::
+        # test_dependency_licences_are_permissive): the declared pip deps must stay permissive
+        # (duckdb MIT, openpyxl MIT). -rs prints skip reasons.
+        run: uv run --frozen pytest -q -rs
