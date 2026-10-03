@@ -50,7 +50,8 @@ def ident(name: str) -> str:
 def reader(src: dict) -> str:
     """The table function that reads one source (snapshots read their Parquet cache)."""
     kind = src.get("kind")
-    if src.get("cache"):
+    # Only a SQLite/Excel snapshot reads a cache — never trust a `cache` on any other kind.
+    if kind in ("sqlite", "xlsx") and src.get("cache"):
         return f"read_parquet({q(src['cache'])})"
     path = src["path"]
     if kind == "parquet":
@@ -65,7 +66,8 @@ def reader(src: dict) -> str:
 def allowed_files(sources: Iterable[dict]) -> list[str]:
     out: list[str] = []
     for s in sources:
-        out.append(str(s["cache"] if s.get("cache") else s["path"]))
+        snap = s.get("kind") in ("sqlite", "xlsx") and s.get("cache")
+        out.append(str(s["cache"] if snap else s["path"]))
     return sorted(set(out))
 
 
@@ -77,19 +79,24 @@ def open_locked(sources: list[dict], *, extra_paths: Iterable[str | Path] = ()):
     conn = duckdb.connect(
         ":memory:", config={"autoinstall_known_extensions": False, "autoload_known_extensions": False}
     )
+    step = "configuring the engine"
     try:
         conn.execute(f"SET temp_directory={q(paths.spill_dir())}")
-        conn.execute(f"SET memory_limit={q(str(settings.cfg().get('memory_limit') or '1GB'))}")
+        # Spill is DISK: capped on its own, or a big sort/join under a small memory_limit fills
+        # the drive within the time cap. Past this the query fails instead.
+        conn.execute(f"SET max_temp_directory_size={q(settings.SPILL_MAX)}")
+        conn.execute(f"SET memory_limit={q(settings.memory_limit())}")
         conn.execute(f"SET threads={max(1, min(4, os.cpu_count() or 1))}")
         allowed = allowed_files(sources) + [str(p) for p in extra_paths]
         conn.execute("SET allowed_paths=[" + ", ".join(q(p) for p in allowed) + "]")
         conn.execute("SET enable_external_access=false")
         for s in sources:
+            step = f"opening `{s['name']}`"
             conn.execute(f"CREATE VIEW {ident(s['name'])} AS SELECT * FROM {reader(s)}")
         conn.execute("SET lock_configuration=true")
-    except Exception:
+    except Exception as e:  # noqa: BLE001 — a corrupt file or bad setting is a refusal, never a crash
         conn.close()
-        raise
+        raise QueryError(f"Failed {step}: {_first_line(e)}") from None
     return conn
 
 
@@ -107,6 +114,12 @@ def guard(conn, sql: str) -> str:
     if len(stmts) != 1:
         raise QueryError(f"One statement per call, please — got {len(stmts)}.")
     st = stmts[0].type
+    hidden = _INTROSPECTION.search(text)
+    if hidden:
+        raise QueryError(
+            f"`{hidden.group(1)}` isn't available here — it reports the engine's internal configuration, "
+            "not your data. Query the connected sources (data_sources lists them)."
+        )
     if st != duckdb.StatementType.SELECT:
         name = getattr(st, "name", str(st))
         raise QueryError(
@@ -116,6 +129,16 @@ def guard(conn, sql: str) -> str:
     while text.endswith(";"):
         text = text[:-1].rstrip()
     return text
+
+
+# Catalog/config functions that print the plugin's internal paths (the spill dir, the snapshot
+# cache, allowed_paths) rather than any data. Refused by name in the agent's SQL — defence in
+# depth only: what they reveal are paths, never contents (the engine still refuses those reads).
+_INTROSPECTION = re.compile(
+    r"\b(duckdb_settings|current_setting|duckdb_temporary_files|duckdb_views|duckdb_databases|"
+    r"duckdb_secrets|which_secret|duckdb_extensions)\b",
+    re.IGNORECASE,
+)
 
 
 def _first_line(e: BaseException) -> str:
@@ -203,7 +226,7 @@ def referenced(sources: list[dict], sql: str) -> list[dict]:
 
 
 def run_query(sources: list[dict], sql: str, *, cap: int, timeout_s: float) -> Result:
-    conn = open_locked(referenced(sources, sql))
+    conn = open_locked(referenced(sources, sql))  # raises QueryError, never a raw duckdb error
     try:
         return execute(conn, guard(conn, sql), cap=cap, timeout_s=timeout_s)
     finally:

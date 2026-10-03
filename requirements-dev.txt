@@ -1,7 +1,0 @@
-# Test-only deps. At runtime the host (protoAgent) provides langchain-core; duckdb and openpyxl
-# are the plugin's own (requires_pip). These let the suite run standalone in CI with no host.
-duckdb>=1.4,<2
-openpyxl>=3.1
-langchain-core>=0.2
-pytest>=8
-pyyaml>=6

@@ -23,7 +23,7 @@ MAX_SPEC_BYTES = 480 * 1024  # under the Artifact panel's default 512 KB per-ver
 
 
 def _caps() -> tuple[int, float]:
-    return settings.int_setting("row_cap", 1, 10_000), float(settings.int_setting("timeout_s", 1, 600))
+    return settings.int_setting("row_cap", 1, 10_000), settings.timeout_s()
 
 
 def _notes(notes: list[str]) -> str:
@@ -72,60 +72,64 @@ def data_connect(path: str, name: str = "") -> str:
     srcs = sources.load()
     by_key = {(s["path"], s.get("table")): n for n, s in srcs.items()}
     prefix = sources.sanitize(name) if name.strip() else ""
-    added: list[str] = []
     problems: list[str] = list(skipped)
     entries: list[dict] = []
     for f in files:
         try:
             entries.extend(sources.entries_for(f))
-        except engine.QueryError as e:
-            problems.append(str(e))
+        except Exception as e:  # noqa: BLE001 — one unreadable file is a note, not the end of the folder
+            problems.append(f"{f.name} skipped: {engine._first_line(e)}")
     single = len(entries) == 1
+    # Each candidate is OPENED before anything is persisted: a file DuckDB can't read (a corrupt
+    # Parquet, a binary renamed .csv) is reported and never registered, so it can't break later
+    # queries — and the rest of a folder still connects.
+    taken = set(srcs)
+    rows = []
+    timeout = _caps()[1]
     for entry in entries:
         key = (entry["path"], entry.get("table"))
+        label = Path(entry["path"]).name + (f":{entry['table']}" if entry.get("table") is not None else "")
         if key in by_key:
             nm = by_key[key]
         else:
             base = sources.default_name(entry, prefix if (single or not prefix) else "", single)
             if prefix and not single:
                 base = sources.sanitize(f"{prefix}_{base}")
-            nm = sources._unique(base, set(srcs))
-        rec = {k: v for k, v in entry.items()}
+            nm = sources._unique(base, taken)
+        rec = dict(entry)
         if entry["kind"] in sources.SNAPSHOT_KINDS:
             try:
                 rec = sources.snapshot(rec)
             except Exception as e:  # noqa: BLE001
-                problems.append(f"{Path(entry['path']).name}:{entry.get('table')}: {engine._first_line(e)}")
+                problems.append(f"{label} skipped: {engine._first_line(e)}")
                 continue
+        ok, notes = sources.usable({nm: rec}, persist=False)
+        if not ok:
+            problems.extend(notes)
+            continue
+        s = ok[0]
+        try:
+            r = engine.run_query([s], f"SELECT count(*) FROM {engine.ident(nm)}", cap=1, timeout_s=timeout)
+            d = engine.run_query([s], f"SELECT * FROM {engine.ident(nm)} LIMIT 0", cap=1, timeout_s=timeout)
+        except engine.QueryError as e:
+            problems.append(f"{label} skipped — DuckDB couldn't read it: {e}")
+            continue
+        rec = {**{k: v for k, v in s.items() if k != "name"}, "rows": r.rows[0][0], "columns": len(d.columns)}
         srcs[nm] = rec
         by_key[key] = nm
-        added.append(nm)
-    sources.save(srcs)
-    # Shape check: open every new source once, so a file DuckDB can't parse is reported now.
-    ok, notes = sources.usable({n: srcs[n] for n in added})
-    rows = []
-    timeout = _caps()[1]
-    for s in ok:
-        try:
-            r = engine.run_query([s], f"SELECT count(*) FROM {engine.ident(s['name'])}", cap=1, timeout_s=timeout)
-            n_rows = r.rows[0][0]
-            d = engine.run_query([s], f"SELECT * FROM {engine.ident(s['name'])} LIMIT 0", cap=1, timeout_s=timeout)
-            srcs[s["name"]]["rows"] = n_rows
-            srcs[s["name"]]["columns"] = len(d.columns)
-            rows.append((s["name"], s["kind"], n_rows, len(d.columns), _short(s["path"], s.get("table"))))
-        except engine.QueryError as e:
-            problems.append(f"`{s['name']}` couldn't be read: {e}")
-            srcs.pop(s["name"], None)
-    sources.save(srcs)
+        taken.add(nm)
+        rows.append((nm, rec["kind"], rec["rows"], rec["columns"], _short(rec["path"], rec.get("table"))))
+    if rows:
+        sources.save(srcs)
     if not rows:
-        return "Nothing connected." + _notes(problems + notes)
+        return "Nothing connected." + _notes(problems)
     return (
         f"Connected {len(rows)} source(s):\n"
         + engine.md_table(["source", "kind", "rows", "cols", "from"], rows)
         + "\nQuery them by name in data_query (e.g. SELECT * FROM "
         + rows[0][0]
         + " LIMIT 5)."
-        + _notes(problems + notes)
+        + _notes(problems)
     )
 
 

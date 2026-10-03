@@ -46,11 +46,13 @@ config:
 # ADR 0019 §3b) — core's only per-key operator-only fence. `data_dirs` carries it for the same
 # reason campaign's `upload_dirs` does: it decides which local files the agent may READ (and
 # then quote back into the conversation or an export) — an exfiltration path — so the agent must
-# never widen it itself. Older cores ignore the field.
+# never widen it itself. `timeout_s` and `memory_limit` carry it too: they bound how long a query
+# runs and how much it holds (and spills — spill is also hard-capped at 1 GB), so the agent can't
+# lift them to grind the host. Both are clamped in code as well. Older cores ignore the field.
 settings:
   - { key: data_dirs, label: "Data folders", type: string, spawns: true, group: "Data Analyst", description: "Comma- or newline-separated absolute folders the agent may connect data files from (symlinks resolved; a file must really live inside one). Blank refuses every connect. Credential files and dirs (.env, *.pem, .ssh, …) and the agent's home (~/.protoagent) are refused even inside these; the filesystem root, your home dir or a parent of it, and the agent's home are ignored as too broad. Queries are read-only: nothing in these folders is ever written. Operator-only: the agent can't widen it." }
   - { key: row_cap, label: "Rows per query reply", type: number, group: "Data Analyst", description: "How many rows data_query shows before truncating (the agent is told to aggregate or LIMIT)." }
   - { key: chart_row_cap, label: "Rows per chart", type: number, group: "Data Analyst", description: "Most rows a chart may carry. Past this data_chart refuses and asks for an aggregated query." }
-  - { key: timeout_s, label: "Query time limit (s)", type: number, group: "Data Analyst", description: "A query running longer than this is interrupted." }
-  - { key: memory_limit, label: "Query memory limit", type: string, group: "Data Analyst", description: "DuckDB memory limit per query, e.g. 1GB or 512MB. Larger work spills to the plugin's private temp folder." }
+  - { key: timeout_s, label: "Query time limit (s)", type: number, spawns: true, group: "Data Analyst", description: "A query running longer than this is interrupted (at most 120 s). Operator-only: the agent can't raise it." }
+  - { key: memory_limit, label: "Query memory limit", type: string, spawns: true, group: "Data Analyst", description: "DuckDB memory limit per query, e.g. 1GB or 512MB. Larger work spills to the plugin's private temp folder, capped at 1 GB of disk. Clamped to 64 MB–8 GB; an unreadable value uses 1 GB. Operator-only: the agent can't raise it." }
   - { key: export_row_cap, label: "Rows per export", type: number, group: "Data Analyst", description: "Most rows data_export writes to a file." }

@@ -45,7 +45,8 @@ def test_versions_in_lockstep():
 def test_data_dirs_is_operator_only():
     man = yaml.safe_load((ROOT / "protoagent.plugin.yaml").read_text())
     fields = {s["key"]: s for s in man["settings"]}
-    assert fields["data_dirs"].get("spawns") is True
+    for key in ("data_dirs", "timeout_s", "memory_limit"):  # scope, run time and memory/spill: operator-only
+        assert fields[key].get("spawns") is True, key
     assert set(man["config"]) == set(settings.DEFAULTS) == set(fields)
     assert man["capabilities"]["network"] == []
 

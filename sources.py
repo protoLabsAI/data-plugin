@@ -40,6 +40,7 @@ EXTS = {
     ".db": "sqlite",
 }
 SNAPSHOT_KINDS = {"sqlite", "xlsx"}
+KINDS = set(EXTS.values())
 MAX_DEPTH = 3
 MAX_FILES = 200
 MAX_SNAPSHOT_BYTES = 1024 * 1024 * 1024  # a SQLite/XLSX bigger than this isn't snapshotted
@@ -60,7 +61,29 @@ def load() -> dict[str, dict]:
     except (OSError, ValueError):
         return {}
     srcs = data.get("sources") if isinstance(data, dict) else None
-    return {k: v for k, v in (srcs or {}).items() if isinstance(v, dict) and v.get("path")}
+    out: dict[str, dict] = {}
+    for k, v in (srcs or {}).items():
+        if not isinstance(v, dict) or not v.get("path") or v.get("kind") not in KINDS:
+            continue
+        out[k] = _trusted_cache(v)
+    return out
+
+
+def _trusted_cache(src: dict) -> dict:
+    """``src`` with a ``cache`` only if it's a snapshot kind AND the path lies in THIS plugin's
+    cache dir. sources.json is a file on disk: a ``cache`` pointing anywhere else (or on a csv
+    source, which never has one) would hand that path to the engine's allowed_paths. Dropped
+    instead — a snapshot source then simply re-snapshots on its next use."""
+    cache = src.get("cache")
+    if not cache:
+        return src
+    ok = src.get("kind") in SNAPSHOT_KINDS
+    if ok:
+        try:
+            ok = fence.within(Path(str(cache)).resolve(), paths.cache_dir())
+        except (OSError, RuntimeError):
+            ok = False
+    return src if ok else {k: v for k, v in src.items() if k not in ("cache", "sig")}
 
 
 def save(srcs: dict[str, dict]) -> None:
@@ -311,13 +334,15 @@ def snapshot(entry: dict) -> dict:
 # ── query-time validation ───────────────────────────────────────────────────
 
 
-def usable(srcs: dict[str, dict] | None = None) -> tuple[list[dict], list[str]]:
+def usable(srcs: dict[str, dict] | None = None, *, persist: bool | None = None) -> tuple[list[dict], list[str]]:
     """The registered sources that pass the fence NOW (snapshots refreshed if stale), + notes.
 
     Never trusts what connect recorded: each origin file is re-resolved against the current
     ``data_dirs``; one that moved out of the fence, vanished, or lost its allowlist entry is left
     out of the engine's ``allowed_paths`` (and said so)."""
-    srcs = load() if srcs is None else srcs
+    if persist is None:
+        persist = srcs is None  # only the WHOLE registry is written back — never a subset over it
+    srcs = load() if srcs is None else {k: _trusted_cache(v) for k, v in srcs.items()}
     allowed, _ = fence.roots(settings.cfg().get("data_dirs"))
     ok: list[dict] = []
     notes: list[str] = []
@@ -341,7 +366,9 @@ def usable(srcs: dict[str, dict] | None = None) -> tuple[list[dict], list[str]]:
             if not fence.within(Path(s["cache"]).resolve(), paths.cache_dir()):
                 notes.append(f"`{name}` skipped: its snapshot isn't in this plugin's cache")
                 continue
+        else:
+            s.pop("cache", None)
         ok.append(s)
-    if changed:
+    if changed and persist:
         save(srcs)
     return ok, notes

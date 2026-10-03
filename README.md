@@ -75,8 +75,8 @@ inside any configured data folder is refused.
 | `data_dirs` | `""` | Allowlisted data folders (operator-only). |
 | `row_cap` | 200 | Rows a `data_query` reply shows. |
 | `chart_row_cap` | 5000 | Rows a chart may carry (aggregate in SQL past this). |
-| `timeout_s` | 20 | Per-query time cap. |
-| `memory_limit` | `1GB` | DuckDB memory per query (spills to the plugin's temp dir). |
+| `timeout_s` | 20 | Per-query time cap, at most 120 s. **Operator-only.** |
+| `memory_limit` | `1GB` | DuckDB memory per query, clamped to 64 MB–8 GB (an unreadable value uses 1 GB). Work past it spills to the plugin's temp dir, hard-capped at **1 GB of disk**. **Operator-only.** |
 | `export_row_cap` | 1000000 | Rows `data_export` writes. |
 
 Settings apply on the next call — no restart.
@@ -84,7 +84,7 @@ Settings apply on the next call — no restart.
 ## Development
 
 ```bash
-uv venv && uv pip install -r requirements-dev.txt ruff
+uv sync            # installs exactly uv.lock (CI uses `uv sync --frozen`)
 ruff check . && ruff format --check . && pytest -q
 ```
 

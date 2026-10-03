@@ -11,6 +11,7 @@ dependencies = ["duckdb>=1.4,<2", "openpyxl>=3.1"]
 dev = [
   "langchain-core>=0.2",
   "pytest>=8",
+  "pyyaml>=6",
   "ruff>=0.6",
 ]
 
