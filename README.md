@@ -11,7 +11,7 @@ Vega-Lite (`mark` + `encoding`, no data) — and the plugin inlines the query's 
 spec to the panel. No hand-written React component, no rows round-tripping through the chat.
 
 > **Requires protoAgent ≥ 0.192.0** — the release that adds the `vega-lite` artifact kind and the
-> `artifact.show` plugin service (ADR 0116, protoAgent PR `feat/data-analyst-adr-and-chart-kind`).
+> `artifact.show` plugin service (ADR 0116, [protoAgent#4025](https://github.com/protoLabsAI/protoAgent/pull/4025)).
 > **That core release isn't out yet**; until it is, every tool except `data_chart` works on an
 > older core, and `data_chart` says why it couldn't render (and returns the spec it would have).
 
