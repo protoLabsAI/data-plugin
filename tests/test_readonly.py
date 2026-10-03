@@ -93,3 +93,14 @@ def test_source_files_are_never_written(connected):
     call(tools.data_query, sql=f"COPY sales TO '{connected['files']['csv']}'")
     call(tools.data_query, sql="SELECT * FROM sales")
     assert connected["files"]["csv"].read_bytes() == before
+
+
+def test_a_query_gets_views_and_paths_only_for_the_sources_it_names():
+    """A view per connected source re-sniffed every file on every query (~2 s at the 200-file
+    cap). Only named sources get a view — and only their files are in allowed_paths."""
+    srcs = [{"name": n, "path": f"/d/{n}.csv", "kind": "csv"} for n in ("sales", "sales_2", "staff", "menu")]
+    names = lambda sql: [s["name"] for s in engine.referenced(srcs, sql)]  # noqa: E731
+    assert names("SELECT * FROM sales JOIN Staff USING (id)") == ["sales", "staff"]
+    assert names('select * from "SALES_2"') == ["sales_2"]  # quoted, any case; not "sales"
+    assert names("SELECT 1") == []
+    assert names("SELECT * FROM menus") == []  # a longer word isn't the source

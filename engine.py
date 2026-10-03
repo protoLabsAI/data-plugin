@@ -23,6 +23,7 @@ import datetime as _dt
 import decimal
 import math
 import os
+import re
 import threading
 import time
 import uuid
@@ -190,8 +191,19 @@ def _explain(e: BaseException) -> str:
     return msg
 
 
+def referenced(sources: list[dict], sql: str) -> list[dict]:
+    """The sources ``sql`` names (as a whole word, any case) — the only ones a query needs a view for.
+
+    Creating a view binds its reader, which sniffs the file, so a view per CONNECTED source cost
+    every query ~2 s at the 200-file cap. Narrowing also narrows ``allowed_paths``: a query can
+    reach only the sources it names. Over-matching (a name inside a string literal) is harmless;
+    a source the SQL doesn't name simply isn't there, and DuckDB says so."""
+    low = (sql or "").lower()
+    return [s for s in sources if re.search(r"(?<![a-z0-9_])" + re.escape(s["name"].lower()) + r"(?![a-z0-9_])", low)]
+
+
 def run_query(sources: list[dict], sql: str, *, cap: int, timeout_s: float) -> Result:
-    conn = open_locked(sources)
+    conn = open_locked(referenced(sources, sql))
     try:
         return execute(conn, guard(conn, sql), cap=cap, timeout_s=timeout_s)
     finally:
@@ -201,7 +213,7 @@ def run_query(sources: list[dict], sql: str, *, cap: int, timeout_s: float) -> R
 def export(sources: list[dict], sql: str, out: Path, fmt: str, *, cap: int, timeout_s: float) -> int:
     """COPY the guarded SELECT to ``out`` (an exact path we chose). Returns rows written."""
     tmp = out.with_name(f".{out.name}.{uuid.uuid4().hex[:8]}.part")
-    conn = open_locked(sources, extra_paths=[tmp])
+    conn = open_locked(referenced(sources, sql), extra_paths=[tmp])
     try:
         body = guard(conn, sql)
         opts = "FORMAT csv, HEADER true" if fmt == "csv" else "FORMAT parquet"

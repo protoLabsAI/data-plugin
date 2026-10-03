@@ -31,7 +31,18 @@ def _notes(notes: list[str]) -> str:
 
 
 def _no_sources(notes: list[str]) -> str:
-    return "No usable data sources — connect one with data_connect(path)." + _notes(notes)
+    """Nothing connected yet — and WHERE the operator said the data lives, so a question like
+    "what were my best weekdays?" can go straight to data_connect instead of asking for a path."""
+    allowed, root_notes = fence.roots(settings.cfg().get("data_dirs"))
+    if allowed:
+        where = (
+            " The operator's allowlisted data folders — connect one (or a file inside it): "
+            + ", ".join(f"`{r}`" for r in allowed)
+            + "."
+        )
+    else:
+        where = f" No data folders are allowlisted yet — the operator sets them in {fence.SETTINGS_HINT}."
+    return "No usable data sources — connect one with data_connect(path)." + where + _notes(notes + root_notes)
 
 
 @tool

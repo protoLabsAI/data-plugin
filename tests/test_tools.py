@@ -96,6 +96,15 @@ def test_query_with_no_sources(env):
     assert "No usable data sources" in call(tools.data_query, sql="SELECT 1")
 
 
+def test_no_sources_points_at_the_allowlisted_folders(env, monkeypatch):
+    """The operator allowlisted a folder FOR the agent: with nothing connected yet, say where it
+    is, so the agent can connect it without asking the operator for a path."""
+    out = call(tools.data_sources)
+    assert "allowlisted data folders" in out and str(env["data_dir"].resolve()) in out
+    monkeypatch.setattr(settings, "cfg", lambda: {"data_dirs": ""})
+    assert "No data folders are allowlisted yet" in call(tools.data_sources)
+
+
 @pytest.mark.parametrize(
     "raw,want", [("Sales 2026.csv", "sales_2026_csv"), ("2026", "t_2026"), ("order", "order_data")]
 )
