@@ -6,6 +6,7 @@ host without it); tests call :func:`configure` with a plain dict.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Callable
 
@@ -46,29 +47,80 @@ def cfg() -> dict[str, Any]:
 # are operator-only (`spawns: true`), but a host older than that marker — or a hand-edited YAML —
 # still can't push a query past these: memory spills to disk, and spill is capped separately.
 MEMORY_MIN_MB = 64
-MEMORY_MAX_MB = 8 * 1024
+MEMORY_MAX_MB = 8000  # 8GB in DuckDB's decimal units
 TIMEOUT_MAX_S = 120
 SPILL_MAX = "1GB"  # DuckDB max_temp_directory_size: a query that would spill more fails instead
-_UNITS = {"": 1, "b": 1 / 2**20, "kb": 1 / 1024, "kib": 1 / 1024, "mb": 1, "mib": 1, "gb": 1024, "gib": 1024}
+# DuckDB's size syntax: a number + an optional unit (K/M/G/T, with or without B, decimal or the
+# binary KiB/MiB/GiB/TiB). A bare number is MB here (the setting's documented unit).
+_UNITS_MB = {
+    "": 1, "b": 1 / 1e6, "byte": 1 / 1e6, "bytes": 1 / 1e6,
+    "k": 1e-3, "kb": 1e-3, "m": 1, "mb": 1, "g": 1e3, "gb": 1e3, "t": 1e6, "tb": 1e6,
+    "kib": 1024 / 1e6, "mib": 2**20 / 1e6, "gib": 2**30 / 1e6, "tib": 2**40 / 1e6,
+}  # fmt: skip
 _MEM_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-z]*)\s*$", re.IGNORECASE)
+_log = logging.getLogger("protoagent.plugins.data")
+_WARNED: set[str] = set()
+
+
+def _clamp_note(note: str) -> None:
+    """Log a clamp/reset once per distinct note (it recurs on every call while the setting stands)."""
+    if note not in _WARNED:
+        _WARNED.add(note)
+        _log.warning("[data] %s", note)
+
+
+def _memory() -> tuple[str, str | None]:
+    raw = str(cfg().get("memory_limit") or "").strip()
+    m = _MEM_RE.match(raw)
+    unit = (m.group(2) or "").lower() if m else ""
+    if not m or unit not in _UNITS_MB:
+        return "1000MB", f"memory_limit {raw!r} isn't a size (e.g. 512MB, 2G) — using 1GB"
+    mb = float(m.group(1)) * _UNITS_MB[unit]
+    if mb < MEMORY_MIN_MB:
+        return f"{MEMORY_MIN_MB}MB", f"memory_limit {raw} clamped to {MEMORY_MIN_MB}MB (min)"
+    if mb > MEMORY_MAX_MB:
+        return "8GB", f"memory_limit {raw} clamped to 8GB (max)"
+    return f"{int(round(mb))}MB", None
 
 
 def memory_limit() -> str:
-    """The validated ``memory_limit`` as DuckDB syntax (``"<n>MB"``), clamped to sane bounds.
+    """The validated ``memory_limit`` as DuckDB syntax, clamped to [64MB, 8GB]. Accepts DuckDB's
+    size syntax (``512MB``, ``512M``, ``2G``, ``2GB``, ``1TB``, ``1.5GiB``); a value that isn't a
+    size uses 1GB rather than reaching DuckDB, where it failed every query. A clamp is reported
+    (log + :func:`clamp_notes`), never silent."""
+    val, note = _memory()
+    if note:
+        _clamp_note(note)
+    return val
 
-    Anything unparseable (``"lots"``) falls back to the default instead of reaching DuckDB, where a
-    bad value made every query fail with a ParserException."""
-    raw = str(cfg().get("memory_limit") or "")
-    m = _MEM_RE.match(raw)
-    unit = (m.group(2) or "").lower() if m else ""
-    if not m or unit not in _UNITS:
-        m, unit = _MEM_RE.match(str(DEFAULTS["memory_limit"])), "gb"
-    mb = float(m.group(1)) * _UNITS[unit]
-    return f"{int(max(MEMORY_MIN_MB, min(MEMORY_MAX_MB, mb)))}MB"
+
+def _timeout() -> tuple[float, str | None]:
+    raw = cfg().get("timeout_s")
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        return float(DEFAULTS["timeout_s"]), f"timeout_s {raw!r} isn't a number — using {DEFAULTS['timeout_s']}s"
+    if n > TIMEOUT_MAX_S:
+        return float(TIMEOUT_MAX_S), f"timeout clamped to {TIMEOUT_MAX_S}s (max)"
+    if n < 1:
+        return 1.0, "timeout clamped to 1s (min)"
+    return n, None
 
 
 def timeout_s() -> float:
-    return float(int_setting("timeout_s", 1, TIMEOUT_MAX_S))
+    val, note = _timeout()
+    if note:
+        _clamp_note(note)
+    return val
+
+
+def clamp_notes() -> list[str]:
+    """What the current settings were clamped or reset to — appended to tool results, so the
+    agent (and the operator reading along) knows the engine isn't running on the value set."""
+    out = [n for _, n in (_memory(), _timeout()) if n]
+    for n in out:
+        _clamp_note(n)
+    return out
 
 
 def int_setting(name: str, lo: int, hi: int) -> int:

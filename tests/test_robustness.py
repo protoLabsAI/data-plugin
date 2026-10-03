@@ -52,9 +52,20 @@ def test_a_poisoned_registry_entry_is_a_refusal_not_a_crash(env):
 
 @pytest.mark.parametrize(
     ("raw", "want"),
-    [("lots", "1024MB"), ("", "1024MB"), ("512MB", "512MB"), ("2 gb", "2048MB"), ("1", "64MB"), ("999GB", "8192MB")],
+    [
+        ("512MB", "512MB"),
+        ("512M", "512MB"),
+        ("2G", "2000MB"),
+        ("2GB", "2000MB"),
+        ("2 gb", "2000MB"),
+        ("1.5GiB", "1611MB"),
+        ("1TB", "8GB"),  # clamped to the max, not reset
+        ("1", "64MB"),  # a bare number is MB → clamped up to the min
+        ("lots", "1000MB"),  # not a size at all → the default (1GB)
+        ("", "1000MB"),
+    ],
 )
-def test_memory_limit_is_validated_and_clamped(env, raw, want):
+def test_memory_limit_accepts_duckdb_size_syntax_and_clamps(env, raw, want):
     settings.configure({"data_dirs": str(env["data_dir"]), "memory_limit": raw})
     assert settings.memory_limit() == want
 
@@ -67,6 +78,19 @@ def test_an_invalid_memory_limit_never_breaks_queries(connected):
 def test_timeout_is_clamped(env):
     settings.configure({"data_dirs": str(env["data_dir"]), "timeout_s": 100000})
     assert settings.timeout_s() == settings.TIMEOUT_MAX_S
+
+
+def test_a_clamp_is_reported_in_the_log_and_the_tool_result(connected, caplog):
+    settings._WARNED.clear()
+    settings.configure({"data_dirs": str(connected["data_dir"]), "timeout_s": 100000, "memory_limit": "1TB"})
+    with caplog.at_level("WARNING", logger="protoagent.plugins.data"):
+        out = call(tools.data_sources)
+        again = call(tools.data_query, sql="SELECT 1 AS x")
+    assert "timeout clamped to 120s (max)" in out and "memory_limit 1TB clamped to 8GB (max)" in out
+    assert "timeout clamped to 120s (max)" in again
+    assert caplog.text.count("timeout clamped to 120s (max)") == 1  # logged once, not per call
+    settings.configure({"data_dirs": str(connected["data_dir"])})
+    assert "clamped" not in call(tools.data_sources)
 
 
 def test_spill_is_capped_on_disk(env):
@@ -95,10 +119,34 @@ def test_a_query_that_would_spill_past_the_cap_fails_cleanly(connected, monkeypa
 
 @pytest.mark.parametrize(
     "sql",
-    ["SELECT * FROM duckdb_settings()", "SELECT current_setting('temp_directory')", "SELECT sql FROM duckdb_views()"],
+    [
+        "SELECT name, value FROM duckdb_settings()",
+        "SELECT * FROM query(concat('SELECT name, value FROM duckdb_', 'settings()'))",
+        "SELECT current_setting('temp_directory') AS t, current_setting('secret_directory') AS s, "
+        "current_setting('home_directory') AS h, current_setting('extension_directory') AS e",
+    ],
 )
-def test_introspection_of_internal_paths_is_refused(connected, sql):
-    assert "isn't available here" in call(tools.data_query, sql=sql)
+def test_engine_settings_reveal_no_home_and_no_store_path(connected, sql):
+    """Nothing is blocked by name (a regex is bypassable, e.g. through query()) — instead every
+    path the engine can print is opaque: no home dir, no username dir, no plugin-store layout."""
+    out = call(tools.data_query, sql=sql + (" LIMIT 1000" if "duckdb_settings" in sql else ""))
+    assert "isn't available" not in out
+    for secret in (str(Path.home()), str(paths.store_dir()), "stored_secrets"):
+        assert secret not in out, secret
+    assert "pa-data-" in out or "|" in out
+
+
+def test_settings_names_in_string_literals_are_just_strings(connected):
+    out = call(tools.data_query, sql="SELECT 'duckdb_settings and current_setting' AS note")
+    assert "duckdb_settings and current_setting" in out
+
+
+def test_the_runtime_dir_is_opaque_private_and_shared(env):
+    rt = paths.runtime_dir()
+    assert rt.name.startswith("pa-data-") and str(Path.home()) not in str(rt)
+    assert paths.runtime_dir() == rt  # deterministic: every process of the instance shares it
+    if hasattr(__import__("os"), "getuid"):
+        assert (rt.stat().st_mode & 0o777) == 0o700
 
 
 def test_a_cache_path_on_a_csv_source_is_dropped(env, tmp_path):

@@ -82,6 +82,10 @@ def open_locked(sources: list[dict], *, extra_paths: Iterable[str | Path] = ()):
     step = "configuring the engine"
     try:
         conn.execute(f"SET temp_directory={q(paths.spill_dir())}")
+        home = paths.duckdb_home()
+        conn.execute(f"SET home_directory={q(home)}")
+        conn.execute(f"SET secret_directory={q(home / 'secrets')}")
+        conn.execute(f"SET extension_directory={q(home / 'extensions')}")
         # Spill is DISK: capped on its own, or a big sort/join under a small memory_limit fills
         # the drive within the time cap. Past this the query fails instead.
         conn.execute(f"SET max_temp_directory_size={q(settings.SPILL_MAX)}")
@@ -114,12 +118,6 @@ def guard(conn, sql: str) -> str:
     if len(stmts) != 1:
         raise QueryError(f"One statement per call, please — got {len(stmts)}.")
     st = stmts[0].type
-    hidden = _INTROSPECTION.search(text)
-    if hidden:
-        raise QueryError(
-            f"`{hidden.group(1)}` isn't available here — it reports the engine's internal configuration, "
-            "not your data. Query the connected sources (data_sources lists them)."
-        )
     if st != duckdb.StatementType.SELECT:
         name = getattr(st, "name", str(st))
         raise QueryError(
@@ -129,16 +127,6 @@ def guard(conn, sql: str) -> str:
     while text.endswith(";"):
         text = text[:-1].rstrip()
     return text
-
-
-# Catalog/config functions that print the plugin's internal paths (the spill dir, the snapshot
-# cache, allowed_paths) rather than any data. Refused by name in the agent's SQL — defence in
-# depth only: what they reveal are paths, never contents (the engine still refuses those reads).
-_INTROSPECTION = re.compile(
-    r"\b(duckdb_settings|current_setting|duckdb_temporary_files|duckdb_views|duckdb_databases|"
-    r"duckdb_secrets|which_secret|duckdb_extensions)\b",
-    re.IGNORECASE,
-)
 
 
 def _first_line(e: BaseException) -> str:

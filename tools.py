@@ -27,6 +27,9 @@ def _caps() -> tuple[int, float]:
 
 
 def _notes(notes: list[str]) -> str:
+    # Every tool result that carries notes also says when a setting was clamped or reset
+    # ("timeout clamped to 120s (max)") — the engine isn't running on the value the operator set.
+    notes = list(notes) + [n for n in settings.clamp_notes() if n not in notes]
     return ("\n\n" + "\n".join(f"- {n}" for n in notes[:10])) if notes else ""
 
 
