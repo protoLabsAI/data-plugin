@@ -1,0 +1,35 @@
+[project]
+name = "data"
+version = "0.1.0"            # keep in lockstep with protoagent.plugin.yaml and __init__.__version__
+description = "Data Analyst — local-first data analysis (DuckDB, read-only SQL, profiles, Vega-Lite charts) for protoAgent."
+requires-python = ">=3.11"
+# The host (protoAgent) provides langchain-core. duckdb is the engine; openpyxl reads .xlsx
+# (optional — declared optional in the manifest's requires_pip).
+dependencies = ["duckdb>=1.4,<2", "openpyxl>=3.1"]
+
+[dependency-groups]
+dev = [
+  "langchain-core>=0.2",
+  "pytest>=8",
+  "ruff>=0.6",
+]
+
+[tool.uv]
+package = false   # a plugin directory, not an installable package
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+# Mirrors protoAgent's own selection so local runs and CI agree.
+select = ["E", "F", "W"]
+ignore = [
+  "E402",  # module-level import not at top — late/lazy imports are how host imports stay lazy here
+  "E501",  # line-too-long — long, readable comment lines are intentional
+]

@@ -1,0 +1,26 @@
+name: Release
+
+# Thin caller for the fleet release ritual: tag → LLM-themed release notes → Discord embed →
+# GitHub release body. The logic lives in the reusable
+# protoLabsAI/release-tools/.github/workflows/plugin-release.yml, which reads the version
+# straight from protoagent.plugin.yaml. Fires on a deliberate `chore: release vX.Y.Z` commit
+# to main, or a manual dispatch. Idempotent: an existing tag skips tag + release creation.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Grant write at the caller so it flows into the reusable workflow's GITHUB_TOKEN — a called
+# workflow can only downgrade the caller's token, never escalate.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # The fork guard names THIS repo, or a fork would cut releases under the upstream name.
+    if: >-
+      github.repository == 'protoLabsAI/data-plugin' &&
+      (github.event_name == 'workflow_dispatch' ||
+       startsWith(github.event.head_commit.message, 'chore: release v'))
+    uses: protoLabsAI/release-tools/.github/workflows/plugin-release.yml@v2
+    secrets: inherit

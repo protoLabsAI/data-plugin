@@ -1,0 +1,31 @@
+name: CI
+
+# Lint + test the plugin, host-free. Runs on the org's Namespace Linux profile when the
+# NSC_RUNNER variable names one, else on a GitHub-hosted ubuntu runner.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ vars.NSC_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt ruff
+
+      - name: Lint
+        run: ruff check . && ruff format --check .
+
+      - name: Test
+        # Includes tests/test_licences.py: the declared pip deps' licences must stay on the
+        # permissive allowlist (duckdb MIT, openpyxl MIT).
+        run: pytest -q -rs

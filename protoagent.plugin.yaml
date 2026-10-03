@@ -1,0 +1,56 @@
+id: data
+name: Data Analyst
+version: 0.1.0
+description: >-
+  Local-first data analysis — your agent, your data, your way. Point the agent at CSV, TSV,
+  Parquet, JSON, Excel and SQLite files (or folders of them) inside folders the operator
+  allowlists; it explores them with READ-ONLY SQL on an embedded DuckDB that queries the files
+  in place (no server, no import step), profiles them, exports results to the workspace, and
+  charts them in the console's Artifact panel as live, themed Vega-Lite charts. The model writes
+  a few lines of SQL and a small spec; the plugin inlines the rows, so a chart lands in seconds.
+  Adds seven data_* tools and two skills.
+# Provenance (ADR 0027) — shown in the install review when added by git URL.
+repository: "https://github.com/protoLabsAI/data-plugin"
+guide_url: "https://github.com/protoLabsAI/data-plugin#quick-start"
+# 0.192.0 ships the `vega-lite` artifact kind and the `artifact.show` plugin service
+# (graph.sdk.service, ADR 0116) that data_chart renders through. On an older core every tool
+# but data_chart works, and data_chart says why it couldn't render.
+min_protoagent_version: "0.192.0"
+
+# Declarative posture (ADR 0071). No outbound calls, no credentials: DuckDB runs with external
+# access OFF (no httpfs, no extension installs), and the only files it can open are the
+# connected sources inside `data_dirs` plus this plugin's own cache. Writes go only to this
+# plugin's store (registry + Parquet snapshots of SQLite/Excel) and the workspace's
+# data-exports/ folder.
+capabilities:
+  network: []
+  filesystem: scoped
+enabled: false              # author default — operators opt in via plugins.enabled
+
+# Declared, NOT auto-installed (ADR 0027 D4). Both are imported IN-PROCESS by the plugin, so
+# `scope: host`. duckdb (MIT) is the engine; openpyxl (MIT) only reads .xlsx — optional, and
+# connecting a workbook without it says how to install it.
+requires_pip:
+  - { pkg: "duckdb>=1.4,<2", scope: host }
+  - { pkg: "openpyxl>=3.1", optional: true, scope: host }
+
+config_section: data
+config:
+  data_dirs: ""             # folders the agent may connect files from (comma/newline separated); blank = none
+  row_cap: 200              # rows a data_query reply shows before truncating
+  chart_row_cap: 5000       # rows a data_chart may inline (aggregate in SQL past this)
+  timeout_s: 20             # per-query time cap (seconds)
+  memory_limit: "1GB"       # DuckDB memory limit per query
+  export_row_cap: 1000000   # rows a data_export may write
+# `spawns: true` marks a setting the agent's own set_config tool refuses to write (protoAgent
+# ADR 0019 §3b) — core's only per-key operator-only fence. `data_dirs` carries it for the same
+# reason campaign's `upload_dirs` does: it decides which local files the agent may READ (and
+# then quote back into the conversation or an export) — an exfiltration path — so the agent must
+# never widen it itself. Older cores ignore the field.
+settings:
+  - { key: data_dirs, label: "Data folders", type: string, spawns: true, group: "Data Analyst", description: "Comma- or newline-separated absolute folders the agent may connect data files from (symlinks resolved; a file must really live inside one). Blank refuses every connect. Credential files and dirs (.env, *.pem, .ssh, …) and the agent's home (~/.protoagent) are refused even inside these; the filesystem root, your home dir or a parent of it, and the agent's home are ignored as too broad. Queries are read-only: nothing in these folders is ever written. Operator-only: the agent can't widen it." }
+  - { key: row_cap, label: "Rows per query reply", type: number, group: "Data Analyst", description: "How many rows data_query shows before truncating (the agent is told to aggregate or LIMIT)." }
+  - { key: chart_row_cap, label: "Rows per chart", type: number, group: "Data Analyst", description: "Most rows a chart may carry. Past this data_chart refuses and asks for an aggregated query." }
+  - { key: timeout_s, label: "Query time limit (s)", type: number, group: "Data Analyst", description: "A query running longer than this is interrupted." }
+  - { key: memory_limit, label: "Query memory limit", type: string, group: "Data Analyst", description: "DuckDB memory limit per query, e.g. 1GB or 512MB. Larger work spills to the plugin's private temp folder." }
+  - { key: export_row_cap, label: "Rows per export", type: number, group: "Data Analyst", description: "Most rows data_export writes to a file." }
