@@ -68,3 +68,16 @@ def test_dependency_licences_are_permissive(dist):
     found |= {c.split("::")[-1].strip() for c in md.get_all("Classifier") or [] if c.startswith("License ::")}
     assert any(any(a.lower() in f.lower() for a in ALLOWED_LICENCES) for f in found if f), found
     assert any("MIT" in f for f in found), f"{dist} is expected to be MIT: {found}"
+
+
+def test_data_dirs_renders_the_folder_picker():
+    """`data_dirs` is a `path` setting so the console shows Browse… (server-side picker),
+    and it stays operator-only (`spawns: true`)."""
+    import yaml
+    from pathlib import Path
+
+    man = yaml.safe_load((Path(__file__).resolve().parent.parent / "protoagent.plugin.yaml").read_text())
+    spec = next(s for s in man["settings"] if s["key"] == "data_dirs")
+    assert spec["type"] == "path"
+    assert spec.get("path_kind", "dir") == "dir"
+    assert spec["spawns"] is True
