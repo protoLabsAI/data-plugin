@@ -14,6 +14,7 @@ inside functions so the suite runs with no protoAgent present.
 from __future__ import annotations
 
 import logging
+import sys
 
 log = logging.getLogger("protoagent.plugins.data")
 
@@ -54,16 +55,19 @@ def register(registry) -> None:
     except Exception:
         log.exception("[data] configuring failed")
 
-    try:
-        import duckdb  # noqa: F401 — the one hard dependency; say so instead of failing every call
-    except ImportError:
+    # duckdb is the one hard dependency. It runs in-process when the host can import it (a
+    # source/server install), else in the managed Python runtime (the desktop app — see engine).
+    # Say what's missing up front instead of failing every call. A managed runtime that lacks
+    # duckdb is the host's own deps banner (the manifest's runtime-scoped dep), not ours.
+    from . import engine
+
+    if not engine.in_process():
+        exe = engine.worker_python()
         gap = getattr(registry, "report_setup_gap", None)
-        if callable(gap):
-            gap(
-                "duckdb",
-                "Data Analyst needs the `duckdb` Python package — use Install dependencies.",
-                action={"kind": "install_deps"},
-            )
+        if callable(gap) and exe is None:
+            gap("duckdb", engine.RUNTIME_HINT, action={"kind": "install_deps"})
+        elif callable(gap) and exe == sys.executable:
+            gap("duckdb", engine.INSTALL_HINT, action={"kind": "install_deps"})
     registry.register_tools(tools.TOOLS)
     try:
         registry.register_skill_dir("skills")

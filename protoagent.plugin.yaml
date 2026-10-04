@@ -27,11 +27,15 @@ capabilities:
   filesystem: scoped
 enabled: false              # author default — operators opt in via plugins.enabled
 
-# Declared, NOT auto-installed (ADR 0027 D4). Both are imported IN-PROCESS by the plugin, so
-# `scope: host`. duckdb (MIT) is the engine; openpyxl (MIT) only reads .xlsx — optional, and
-# connecting a workbook without it says how to install it.
+# Declared, NOT auto-installed (ADR 0027 D4).
+# duckdb (MIT) is the engine. It is deliberately NOT `scope: host`: the packaged desktop app's
+# host is a frozen binary that can't take a compiled dependency, and refuses a hard host-scoped
+# one outright. So duckdb is a runtime dep — on the desktop it installs into the managed Python
+# runtime and `engine` runs each query there as a worker (`duck.py`); on a source/server install
+# it installs into the host's environment and runs in-process. openpyxl (MIT) only reads .xlsx,
+# in-process — optional, and connecting a workbook without it says how to install it.
 requires_pip:
-  - { pkg: "duckdb>=1.4,<2", scope: host }
+  - { pkg: "duckdb>=1.4,<2", scope: runtime }
   - { pkg: "openpyxl>=3.1", optional: true, scope: host }
 
 config_section: data

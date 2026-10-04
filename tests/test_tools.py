@@ -116,7 +116,7 @@ def test_timestamptz_columns_render_without_pytz(env, monkeypatch):
     """A TIMESTAMPTZ column needs pytz to become a Python datetime; a lean host may not have it."""
     from data import engine
 
-    monkeypatch.setattr(engine, "_have_pytz", lambda: False)
+    monkeypatch.setattr(engine.duck, "_have_pytz", lambda: False)
     call(tools.data_connect, path=str(env["files"]["csv"]))
     out = call(tools.data_query, sql="SELECT day::TIMESTAMPTZ AS ts, cups FROM sales ORDER BY ts LIMIT 1")
     assert "| ts | cups |" in out and "2026-07-06T" in out

@@ -1,136 +1,135 @@
-"""The read-only DuckDB engine: a FRESH, locked, in-memory connection per call.
+"""The read-only query engine: a FRESH, locked, in-memory DuckDB connection per call.
 
-Read-only is enforced by the ENGINE, not by inspecting SQL text:
+The DuckDB code itself — the read-only rules, the SELECT guard, the caps — lives in ``duck.py``.
+This module picks WHERE it runs:
 
-1. ``autoinstall/autoload_known_extensions`` off — nothing is fetched or loaded;
-2. ``temp_directory`` set to this plugin's private ``spill/`` (DuckDB auto-allows its temp dir,
-   so it must not be anywhere shared), plus ``memory_limit`` / ``threads``;
-3. ``allowed_paths`` = the exact resolved files of the sources that pass the fence right now
-   (plus their Parquet snapshots) — and nothing else;
-4. ``enable_external_access = false`` — every other file, URL, ATTACH, COPY target, INSTALL and
-   LOAD is refused by DuckDB itself;
-5. one VIEW per source, created by us, then ``lock_configuration = true`` — so the agent's SQL
-   can't SET/RESET any of the above.
+* **in-process**, when ``duckdb`` is importable in the host (a source/server install, where
+  ``plugin install-deps`` pips it into the host's environment);
+* otherwise as a **worker in the managed Python runtime** (``sdk.managed_python_exe()``) — the
+  packaged desktop app, whose frozen host can't take a compiled dependency, installs plugin deps
+  there instead. One JSON request in, one JSON reply out, a fresh process per call (the same
+  isolation a fresh connection already gave).
 
-On top of that, defence in depth: the agent's SQL must parse (with DuckDB's own parser) to
-exactly ONE ``SELECT`` statement — CREATE, ATTACH ':memory:', PRAGMA, EXPLAIN and multi-statement
-batches are refused before anything runs. A time cap interrupts the query; a row cap truncates.
+Either way the caller sees the same ``Result`` and the same ``QueryError`` messages.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import decimal
+import importlib.util
+import json
 import math
 import os
 import re
-import threading
-import time
+import subprocess
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import paths, settings
+from . import duck, paths, settings
+from .duck import QueryError, allowed_files, guard, ident, q, reader  # noqa: F401 — re-exported
+
+_first_line = duck.first_line
+
+#: Seconds a worker gets on top of the query's own time cap: interpreter start + ``import duckdb``.
+WORKER_SLACK_S = 30.0
+
+INSTALL_HINT = (
+    "Data Analyst needs the `duckdb` Python package — use Install dependencies "
+    "(Settings ▸ Plugins ▸ Data Analyst), or `plugin install-deps data`."
+)
+RUNTIME_HINT = (
+    "Data Analyst runs DuckDB in the managed Python runtime on the desktop app, and it isn't "
+    "provisioned yet — install it under Settings ▸ Tools (Python runtime), then use Install "
+    "dependencies on Data Analyst."
+)
 
 
-class QueryError(Exception):
-    """A refusal or failure with a model-facing message."""
+def env() -> dict:
+    """What the DuckDB side needs from this plugin's paths and settings."""
+    home = paths.duckdb_home()
+    return {
+        "spill": str(paths.spill_dir()),
+        "home": str(home),
+        "spill_max": settings.SPILL_MAX,
+        "memory_limit": settings.memory_limit(),
+        "threads": max(1, min(4, os.cpu_count() or 1)),
+    }
 
 
-def q(s: str | Path) -> str:
-    """A SQL string literal."""
-    return "'" + str(s).replace("'", "''") + "'"
-
-
-def ident(name: str) -> str:
-    return '"' + str(name).replace('"', '""') + '"'
-
-
-def reader(src: dict) -> str:
-    """The table function that reads one source (snapshots read their Parquet cache)."""
-    kind = src.get("kind")
-    # Only a SQLite/Excel snapshot reads a cache — never trust a `cache` on any other kind.
-    if kind in ("sqlite", "xlsx") and src.get("cache"):
-        return f"read_parquet({q(src['cache'])})"
-    path = src["path"]
-    if kind == "parquet":
-        return f"read_parquet({q(path)})"
-    if kind == "json":
-        return f"read_json_auto({q(path)})"
-    if kind == "tsv":
-        return f"read_csv({q(path)}, delim='\\t', header=true)"
-    return f"read_csv({q(path)})"
-
-
-def allowed_files(sources: Iterable[dict]) -> list[str]:
-    out: list[str] = []
-    for s in sources:
-        snap = s.get("kind") in ("sqlite", "xlsx") and s.get("cache")
-        out.append(str(s["cache"] if snap else s["path"]))
-    return sorted(set(out))
-
-
-def open_locked(sources: list[dict], *, extra_paths: Iterable[str | Path] = ()):
-    """A locked connection with one view per source. ``extra_paths`` are exact files our OWN
-    statement may write (an export target) — never anything the agent names."""
-    import duckdb
-
-    conn = duckdb.connect(
-        ":memory:", config={"autoinstall_known_extensions": False, "autoload_known_extensions": False}
-    )
-    step = "configuring the engine"
+def in_process() -> bool:
+    """True when ``duckdb`` imports in THIS process (checked per call — a just-run Install
+    dependencies takes effect without a restart)."""
     try:
-        conn.execute(f"SET temp_directory={q(paths.spill_dir())}")
-        home = paths.duckdb_home()
-        conn.execute(f"SET home_directory={q(home)}")
-        conn.execute(f"SET secret_directory={q(home / 'secrets')}")
-        conn.execute(f"SET extension_directory={q(home / 'extensions')}")
-        # Spill is DISK: capped on its own, or a big sort/join under a small memory_limit fills
-        # the drive within the time cap. Past this the query fails instead.
-        conn.execute(f"SET max_temp_directory_size={q(settings.SPILL_MAX)}")
-        conn.execute(f"SET memory_limit={q(settings.memory_limit())}")
-        conn.execute(f"SET threads={max(1, min(4, os.cpu_count() or 1))}")
-        allowed = allowed_files(sources) + [str(p) for p in extra_paths]
-        conn.execute("SET allowed_paths=[" + ", ".join(q(p) for p in allowed) + "]")
-        conn.execute("SET enable_external_access=false")
-        for s in sources:
-            step = f"opening `{s['name']}`"
-            conn.execute(f"CREATE VIEW {ident(s['name'])} AS SELECT * FROM {reader(s)}")
-        conn.execute("SET lock_configuration=true")
-    except Exception as e:  # noqa: BLE001 — a corrupt file or bad setting is a refusal, never a crash
-        conn.close()
-        raise QueryError(f"Failed {step}: {_first_line(e)}") from None
-    return conn
+        return importlib.util.find_spec("duckdb") is not None
+    except (ImportError, ValueError):
+        return False
 
 
-def guard(conn, sql: str) -> str:
-    """The agent's SQL as exactly one SELECT, or raise. Returns it without a trailing ';'."""
-    import duckdb
-
-    text = (sql or "").strip()
-    if not text:
-        raise QueryError("Empty query.")
+def worker_python() -> str | None:
+    """The interpreter a worker runs under: the managed Python runtime, else — on a source run
+    only — this process's own interpreter. None on a frozen app with no runtime provisioned."""
     try:
-        stmts = conn.extract_statements(text)
-    except Exception as e:  # noqa: BLE001 — a parse error, said plainly
-        raise QueryError(f"SQL didn't parse: {_first_line(e)}") from None
-    if len(stmts) != 1:
-        raise QueryError(f"One statement per call, please — got {len(stmts)}.")
-    st = stmts[0].type
-    if st != duckdb.StatementType.SELECT:
-        name = getattr(st, "name", str(st))
-        raise QueryError(
-            f"Read-only: only SELECT queries run here (got {name}). Nothing can be written, attached, "
-            "installed or reconfigured — query the connected sources with SELECT / WITH / FROM."
+        from graph import sdk  # host import — lazy
+
+        exe = sdk.managed_python_exe()
+    except Exception:  # noqa: BLE001 — no host (tests) or a host without the seam
+        exe = None
+    if exe:
+        return str(exe)
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    return None
+
+
+def _worker_env() -> dict[str, str]:
+    # Scrubbed like execute_code's child: no gateway keys or auth tokens, and no PYTHONHOME /
+    # PYTHONPATH from a frozen parent pointing the runtime at the wrong stdlib.
+    keep = ("PATH", "TMPDIR", "TEMP", "TMP", "SystemRoot", "COMSPEC", "PATHEXT", "LANG", "LC_ALL")
+    out = {k: os.environ[k] for k in keep if k in os.environ}
+    out["PYTHONUNBUFFERED"] = "1"
+    out["PYTHONIOENCODING"] = "utf-8"
+    return out
+
+
+def call(op: str, *, timeout_s: float, **req: Any) -> Any:
+    """Run one DuckDB operation where duckdb lives. Raises ``QueryError`` with a model-facing
+    message for every failure — a refusal, a timeout, or a missing/broken engine."""
+    payload = {"op": op, "env": env(), "timeout_s": float(timeout_s), **req}
+    if in_process():
+        return duck.dispatch(json.loads(json.dumps(payload)))
+    exe = worker_python()
+    if exe is None:
+        raise QueryError(RUNTIME_HINT)
+    try:
+        proc = subprocess.run(
+            [exe, "-I", str(Path(duck.__file__).resolve())],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=float(timeout_s) + WORKER_SLACK_S,
+            env=_worker_env(),
         )
-    while text.endswith(";"):
-        text = text[:-1].rstrip()
-    return text
-
-
-def _first_line(e: BaseException) -> str:
-    return str(e).strip().splitlines()[0][:300] if str(e).strip() else type(e).__name__
+    except subprocess.TimeoutExpired:
+        raise QueryError(
+            f"Query timed out after {timeout_s:g}s — narrow it (filter, aggregate, LIMIT) and try again."
+        ) from None
+    except OSError as e:
+        raise QueryError(f"Couldn't start the query engine ({exe}): {_first_line(e)}") from None
+    try:
+        reply = json.loads(proc.stdout or "")
+    except ValueError:
+        err = [ln for ln in (proc.stderr or "").strip().splitlines() if ln.strip()]
+        raise QueryError(f"The query engine crashed: {err[-1][:300] if err else f'exit {proc.returncode}'}") from None
+    if "missing" in reply:
+        raise QueryError(INSTALL_HINT)
+    if "error" in reply:
+        raise QueryError(str(reply["error"]))
+    return duck.decode(reply.get("ok"))
 
 
 @dataclass
@@ -142,63 +141,9 @@ class Result:
     elapsed: float
 
 
-def _interruptible(conn, timeout_s: float):
-    timer = threading.Timer(max(0.1, float(timeout_s)), conn.interrupt)
-    timer.daemon = True
-    return timer
-
-
-def execute(conn, sql: str, *, cap: int, timeout_s: float) -> Result:
-    """Run already-guarded SQL with the time and row caps."""
-    timer = _interruptible(conn, timeout_s)
-    t0 = time.monotonic()
-    timer.start()
-    try:
-        cur = conn.execute(sql)
-        cols = [d[0] for d in (cur.description or [])]
-        types = [str(d[1]) for d in (cur.description or [])]
-        if any("WITH TIME ZONE" in t.upper() for t in types) and not _have_pytz():
-            # DuckDB hands TIMESTAMPTZ to Python as a tz-aware datetime, which needs pytz — absent
-            # on a lean host. Re-run with those columns as ISO text instead of failing the query.
-            cur = conn.execute(_tz_as_text(sql, cols, types))
-        rows = cur.fetchmany(cap + 1)
-    except Exception as e:  # noqa: BLE001
-        if _is_interrupt(e) or time.monotonic() - t0 >= timeout_s:
-            raise QueryError(
-                f"Query timed out after {timeout_s:g}s — narrow it (filter, aggregate, LIMIT) and try again."
-            ) from None
-        raise QueryError(_explain(e)) from None
-    finally:
-        timer.cancel()
-    return Result(cols, types, rows[:cap], len(rows) > cap, time.monotonic() - t0)
-
-
-def _have_pytz() -> bool:
-    try:
-        import pytz  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-def _tz_as_text(sql: str, cols: list[str], types: list[str]) -> str:
-    tz = [c for c, t in zip(cols, types) if "WITH TIME ZONE" in t.upper()]
-    repl = ", ".join(f"strftime({ident(c)}, '%Y-%m-%dT%H:%M:%S%z') AS {ident(c)}" for c in tz)
-    return f"SELECT * REPLACE ({repl}) FROM (\n{sql}\n) AS q"
-
-
-def _is_interrupt(e: BaseException) -> bool:
-    return "interrupt" in type(e).__name__.lower() or "interrupted" in str(e).lower()
-
-
-def _explain(e: BaseException) -> str:
-    msg = _first_line(e)
-    if "Permission Error" in msg or "disabled by configuration" in msg:
-        return (
-            f"Refused by the read-only engine: {msg}. Only the connected sources are readable — "
-            "use data_sources to see them, data_connect to add a file inside an allowlisted folder."
-        )
-    return msg
+def open_locked(sources: list[dict], *, extra_paths: Iterable[str | Path] = ()):
+    """An in-process locked connection (tests, and callers that know duckdb is importable)."""
+    return duck.open_locked(env(), sources, extra_paths=extra_paths)
 
 
 def referenced(sources: list[dict], sql: str) -> list[dict]:
@@ -213,36 +158,29 @@ def referenced(sources: list[dict], sql: str) -> list[dict]:
 
 
 def run_query(sources: list[dict], sql: str, *, cap: int, timeout_s: float) -> Result:
-    conn = open_locked(referenced(sources, sql))  # raises QueryError, never a raw duckdb error
-    try:
-        return execute(conn, guard(conn, sql), cap=cap, timeout_s=timeout_s)
-    finally:
-        conn.close()
+    got = call("query", sources=referenced(sources, sql), sql=sql, cap=int(cap), timeout_s=float(timeout_s))
+    rows = [tuple(r) for r in got["rows"]]
+    return Result(got["columns"], got["types"], rows, bool(got["truncated"]), float(got["elapsed"]))
 
 
 def export(sources: list[dict], sql: str, out: Path, fmt: str, *, cap: int, timeout_s: float) -> int:
     """COPY the guarded SELECT to ``out`` (an exact path we chose). Returns rows written."""
     tmp = out.with_name(f".{out.name}.{uuid.uuid4().hex[:8]}.part")
-    conn = open_locked(referenced(sources, sql), extra_paths=[tmp])
     try:
-        body = guard(conn, sql)
-        opts = "FORMAT csv, HEADER true" if fmt == "csv" else "FORMAT parquet"
-        stmt = f"COPY (SELECT * FROM (\n{body}\n) AS q LIMIT {int(cap)}) TO {q(tmp)} ({opts})"
-        timer = _interruptible(conn, timeout_s)
-        timer.start()
-        try:
-            got = conn.execute(stmt).fetchone()
-        except Exception as e:  # noqa: BLE001
-            tmp.unlink(missing_ok=True)  # a failed/interrupted COPY leaves no half-written file
-            if _is_interrupt(e):
-                raise QueryError(f"Export timed out after {timeout_s:g}s.") from None
-            raise QueryError(_explain(e)) from None
-        finally:
-            timer.cancel()
-    finally:
-        conn.close()
+        n = call(
+            "export",
+            sources=referenced(sources, sql),
+            sql=sql,
+            tmp=str(tmp),
+            fmt=fmt,
+            cap=int(cap),
+            timeout_s=float(timeout_s),
+        )
+    except QueryError:
+        tmp.unlink(missing_ok=True)  # a failed/interrupted COPY leaves no half-written file
+        raise
     os.replace(tmp, out)
-    return int(got[0]) if got and got[0] is not None else 0
+    return int(n or 0)
 
 
 # ── value shaping ────────────────────────────────────────────────────────────
