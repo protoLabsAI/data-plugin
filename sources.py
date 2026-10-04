@@ -44,6 +44,7 @@ KINDS = set(EXTS.values())
 MAX_DEPTH = 3
 MAX_FILES = 200
 MAX_SNAPSHOT_BYTES = 1024 * 1024 * 1024  # a SQLite/XLSX bigger than this isn't snapshotted
+SNAPSHOT_TIMEOUT_S = 300.0  # the Parquet conversion step of a snapshot (only bounds a worker process)
 _NULL = "\\N"
 _RESERVED = {
     "select", "from", "where", "order", "group", "by", "table", "view", "join", "limit", "user",
@@ -262,8 +263,6 @@ def _cache_path(entry: dict) -> Path:
 
 def snapshot(entry: dict) -> dict:
     """(Re)build ``entry``'s Parquet snapshot; returns the entry with ``cache`` + ``sig`` set."""
-    import duckdb
-
     src = Path(entry["path"])
     if src.stat().st_size > MAX_SNAPSHOT_BYTES:
         raise engine.QueryError(f"{src.name} is over {MAX_SNAPSHOT_BYTES // 2**20} MB — too big to snapshot.")
@@ -302,25 +301,19 @@ def snapshot(entry: dict) -> dict:
                         w.writerow([_csv_value(v) for v in vals] + [_NULL] * (len(names) - len(vals)))
                 finally:
                     wb.close()
-        conn = duckdb.connect(
-            ":memory:", config={"autoinstall_known_extensions": False, "autoload_known_extensions": False}
-        )
         try:
-            conn.execute(f"SET temp_directory={engine.q(paths.spill_dir())}")
-            base = f"read_csv({engine.q(tmp_csv)}, header=true, nullstr={engine.q(_NULL)}"
-            spec = None
-            if columns:
-                spec = "{" + ", ".join(f"{engine.q(k)}: {engine.q(v)}" for k, v in columns.items()) + "}"
-            for attempt in ([f"{base}, columns={spec})"] if spec else []) + [f"{base})", f"{base}, all_varchar=true)"]:
-                try:
-                    conn.execute(f"COPY (SELECT * FROM {attempt}) TO {engine.q(tmp_pq)} (FORMAT parquet)")
-                    break
-                except Exception:  # noqa: BLE001 — declared types the data doesn't honour: loosen
-                    continue
-            else:
-                raise engine.QueryError(f"couldn't snapshot {src.name}:{entry['table']}")
-        finally:
-            conn.close()
+            engine.call(
+                "snapshot",
+                tmp_csv=str(tmp_csv),
+                tmp_pq=str(tmp_pq),
+                columns=columns,
+                null=_NULL,
+                timeout_s=SNAPSHOT_TIMEOUT_S,
+            )
+        except engine.QueryError as e:
+            if "no read of the staged rows" in str(e):
+                raise engine.QueryError(f"couldn't snapshot {src.name}:{entry['table']}") from None
+            raise
         os.replace(tmp_pq, out)
     finally:
         for t in (tmp_csv, tmp_pq):

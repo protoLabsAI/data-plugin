@@ -32,3 +32,8 @@ jobs:
         # test_dependency_licences_are_permissive): the declared pip deps must stay permissive
         # (duckdb MIT, openpyxl MIT). -rs prints skip reasons.
         run: uv run --frozen pytest -q -rs
+
+      - name: Test through the out-of-process engine
+        # The desktop app runs DuckDB in the managed Python runtime (engine.call → duck.py), not
+        # in-process. Re-run the whole suite over that transport so the two can never drift.
+        run: DATA_TEST_WORKER=1 uv run --frozen pytest -q

@@ -20,6 +20,9 @@ spec to the panel. No hand-written React component, no rows round-tripping throu
 1. Install from git: *Settings ▸ Plugins ▸ Add from URL* →
    `https://github.com/protoLabsAI/data-plugin`, enable it, then **Install dependencies**
    (`duckdb`; `openpyxl` too if you'll read `.xlsx`).
+   On the **desktop app** duckdb installs into the managed Python runtime (Settings ▸ Tools ▸
+   Python runtime — provisioned on first use) and each query runs there in a short-lived worker
+   (`duck.py`); on a source/server install it runs in-process. Same engine, same rules.
 2. In *Settings ▸ Plugins ▸ Data Analyst*, set **Data folders** to the folder(s) holding your
    data, e.g. `/Users/me/Data/coffee-shop`. Only the operator can set this — the agent can't.
 3. Ask: *"connect ~/Data/coffee-shop — what were my best weekdays last quarter? chart it"*.
@@ -86,6 +89,7 @@ Settings apply on the next call — no restart.
 ```bash
 uv sync            # installs exactly uv.lock (CI uses `uv sync --frozen`)
 ruff check . && ruff format --check . && pytest -q
+DATA_TEST_WORKER=1 pytest -q   # the same suite through the out-of-process worker (the desktop transport)
 ```
 
 The suite is host-free (the plugin loads under a synthetic package; `graph.sdk` is faked where a

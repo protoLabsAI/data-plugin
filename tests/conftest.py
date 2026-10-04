@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -110,6 +111,13 @@ def env(tmp_path, monkeypatch):
     data_dir = tmp_path / "datasets"
     files = _write_fixtures(data_dir)
     settings.configure({"data_dirs": str(data_dir)})
+    if os.environ.get("DATA_TEST_WORKER") == "1":
+        # Run the WHOLE suite through the out-of-process worker — the desktop app's transport
+        # (duckdb lives only in the managed runtime there). CI runs the suite both ways.
+        from data import engine
+
+        monkeypatch.setattr(engine, "in_process", lambda: False)
+        monkeypatch.setattr(engine, "worker_python", lambda: sys.executable)
     yield {
         "data_dir": data_dir.resolve(),
         "files": files,
