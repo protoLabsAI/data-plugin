@@ -18,7 +18,7 @@ import sys
 
 log = logging.getLogger("protoagent.plugins.data")
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 
 def _host_store(registry) -> str:

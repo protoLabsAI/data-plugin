@@ -1,6 +1,6 @@
 id: data
 name: Data Analyst
-version: 0.1.1
+version: 0.1.2
 description: >-
   Local-first data analysis — your agent, your data, your way. Point the agent at CSV, TSV,
   Parquet, JSON, Excel and SQLite files (or folders of them) inside folders the operator
@@ -54,7 +54,7 @@ config:
 # runs and how much it holds (and spills — spill is also hard-capped at 1 GB), so the agent can't
 # lift them to grind the host. Both are clamped in code as well. Older cores ignore the field.
 settings:
-  - { key: data_dirs, label: "Data folders", type: string, spawns: true, group: "Data Analyst", description: "Comma- or newline-separated absolute folders the agent may connect data files from (symlinks resolved; a file must really live inside one). Blank refuses every connect. Credential files and dirs (.env, *.pem, .ssh, …) and the agent's home (~/.protoagent) are refused even inside these; the filesystem root, your home dir or a parent of it, and the agent's home are ignored as too broad. Queries are read-only: nothing in these folders is ever written. Operator-only: the agent can't widen it." }
+  - { key: data_dirs, label: "Data folders", type: path, path_kind: dir, spawns: true, group: "Data Analyst", description: "The folder (Browse…), or several absolute folders separated by commas or new lines, the agent may connect data files from (symlinks resolved; a file must really live inside one). Blank refuses every connect. Credential files and dirs (.env, *.pem, .ssh, …) and the agent's home (~/.protoagent) are refused even inside these; the filesystem root, your home dir or a parent of it, and the agent's home are ignored as too broad. Queries are read-only: nothing in these folders is ever written. Operator-only: the agent can't widen it." }
   - { key: row_cap, label: "Rows per query reply", type: number, group: "Data Analyst", description: "How many rows data_query shows before truncating (the agent is told to aggregate or LIMIT)." }
   - { key: chart_row_cap, label: "Rows per chart", type: number, group: "Data Analyst", description: "Most rows a chart may carry. Past this data_chart refuses and asks for an aggregated query." }
   - { key: timeout_s, label: "Query time limit (s)", type: number, spawns: true, group: "Data Analyst", description: "A query running longer than this is interrupted (at most 120 s). Operator-only: the agent can't raise it." }
