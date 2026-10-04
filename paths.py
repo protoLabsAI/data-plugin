@@ -10,6 +10,11 @@ Places that are all OURS (never a source directory):
 * the **export dir** — ``<agent workspace>/data-exports``: exports are files the operator and the
   agent's other tools are meant to pick up, so they go to the workspace rather than the store.
   ``DATA_EXPORT_DIR`` overrides it (tests); a host without ``infra.paths`` falls back to the store.
+
+And one place that is NOT ours but the operator's: the **default data folder**,
+``<agent workspace>/data`` (see :func:`default_data_dir`) — a source folder every agent gets, which
+the fence allowlists on top of ``data_dirs``. Exports never land in it (``data-exports`` is its
+sibling, and data_export refuses a destination inside it).
 """
 
 from __future__ import annotations
@@ -87,16 +92,46 @@ def sources_file() -> Path:
     return store_dir() / "sources.json"
 
 
+def _workspace() -> Path | None:
+    """The agent's workspace — core's ``infra.paths.workspace_dir`` (``<instance root>/workspace``,
+    instance-scoped through ``PROTOAGENT_HOME``; ``PROTOAGENT_WORKSPACE`` moves it), the same dir
+    the filesystem tools are fenced to. None with no host (tests, standalone)."""
+    try:
+        from infra.paths import workspace_dir  # host import — lazy
+
+        return Path(workspace_dir(create=True))
+    except Exception:  # noqa: BLE001 — no host, or an older one
+        return None
+
+
+def default_data_dir(*, create: bool = False) -> Path | None:
+    """The agent's own data folder: ``<agent workspace>/data`` — always allowlisted (unless the
+    operator turns ``use_default_folder`` off), so a fresh agent has somewhere to drop files.
+    ``DATA_DEFAULT_DIR`` overrides it (tests). None when there's no host to ask. NOT resolved
+    here: the fence checks the folder itself isn't a symlink before trusting it."""
+    raw = os.environ.get("DATA_DEFAULT_DIR", "").strip()
+    if raw:
+        p = Path(raw).expanduser()
+    else:
+        ws = _workspace()
+        if ws is None:
+            return None
+        p = ws / "data"
+    if create:
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+    return p
+
+
 def export_dir() -> Path:
     raw = os.environ.get("DATA_EXPORT_DIR", "").strip()
     if raw:
         p = Path(raw).expanduser()
     else:
-        try:
-            from infra.paths import workspace_dir  # host import — lazy
-
-            p = Path(workspace_dir(create=True)) / "data-exports"
-        except Exception:  # noqa: BLE001 — no host (tests) or an older one: the store
-            p = store_dir() / "exports"
+        ws = _workspace()
+        # No host (tests) or an older one: the store.
+        p = ws / "data-exports" if ws is not None else store_dir() / "exports"
     p.mkdir(parents=True, exist_ok=True)
     return p.resolve()

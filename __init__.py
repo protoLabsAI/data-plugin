@@ -1,7 +1,7 @@
 """data — Data Analyst: local-first data analysis over your own files (ADR 0116).
 
 Point the agent at local CSV / TSV / Parquet / JSON / Excel / SQLite files inside the operator's
-allowlisted ``data_dirs``; it explores them with READ-ONLY SQL on an embedded DuckDB (querying the
+allowlisted ``data_dirs`` or its own default data folder (``<workspace>/data``); it explores them with READ-ONLY SQL on an embedded DuckDB (querying the
 files in place — no server, no import step), profiles them, exports results to the workspace, and
 charts them in the console's Artifact panel as live Vega-Lite charts. The model writes a few lines
 of SQL plus a small spec; the plugin inlines the rows and hands them to the panel through core's
@@ -18,7 +18,7 @@ import sys
 
 log = logging.getLogger("protoagent.plugins.data")
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 
 def _host_store(registry) -> str:
@@ -40,18 +40,17 @@ def register(registry) -> None:
         paths.configure(_host_store(registry))
         live = getattr(registry, "live_config", None)
         settings.configure(live if callable(live) else (lambda: dict(getattr(registry, "config", None) or {})))
-        roots, notes = fence.roots(settings.cfg().get("data_dirs"))
+        # Judge the setup gap from THIS load's config snapshot, not live_config(): on Settings ▸
+        # Save & apply core re-runs register() before committing the new config, so live_config()
+        # here still returns the old values — the gap would outlive the save that fixed it.
+        # roots() also creates the agent's default data folder (<workspace>/data) if it's missing,
+        # so it exists from the first load — and, being always allowlisted, it clears the gap.
+        snap = settings.merged(dict(getattr(registry, "config", None) or {}))
+        roots, notes = fence.roots(snap.get("data_dirs"), snap)
         for n in notes:
             log.warning("[data] %s", n)
-        gap = getattr(registry, "report_setup_gap", None)
-        if callable(gap):  # a config reload re-runs register(), which clears or re-raises it
-            gap(
-                "data_dirs",
-                None
-                if roots
-                else "Data Analyst has no data folders yet — add the folders the agent may read in its settings.",
-                action={"kind": "plugin_config", "fields": ["data_dirs"]},
-            )
+        settings.set_gap_reporter(getattr(registry, "report_setup_gap", None))
+        settings.sync_gap(bool(roots))
     except Exception:
         log.exception("[data] configuring failed")
 

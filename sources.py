@@ -66,7 +66,8 @@ def load() -> dict[str, dict]:
     for k, v in (srcs or {}).items():
         if not isinstance(v, dict) or not v.get("path") or v.get("kind") not in KINDS:
             continue
-        out[k] = _trusted_cache(v)
+        # Identities are taken fresh at every fence check — never trusted from disk.
+        out[k] = _trusted_cache({kk: x for kk, x in v.items() if kk not in ("ident", "cache_ident")})
     return out
 
 
@@ -264,6 +265,9 @@ def _cache_path(entry: dict) -> Path:
 def snapshot(entry: dict) -> dict:
     """(Re)build ``entry``'s Parquet snapshot; returns the entry with ``cache`` + ``sig`` set."""
     src = Path(entry["path"])
+    before = fence.identity(src)
+    if before is None or (entry.get("ident") and entry["ident"] != before):
+        raise engine.QueryError(engine.CHANGED)
     if src.stat().st_size > MAX_SNAPSHOT_BYTES:
         raise engine.QueryError(f"{src.name} is over {MAX_SNAPSHOT_BYTES // 2**20} MB — too big to snapshot.")
     sig_before = _sig(src)
@@ -314,6 +318,8 @@ def snapshot(entry: dict) -> dict:
             if "no read of the staged rows" in str(e):
                 raise engine.QueryError(f"couldn't snapshot {src.name}:{entry['table']}") from None
             raise
+        if fence.identity(src) != before:  # swapped while we read it: drop what we read
+            raise engine.QueryError(engine.CHANGED)
         os.replace(tmp_pq, out)
     finally:
         for t in (tmp_csv, tmp_pq):
@@ -321,7 +327,7 @@ def snapshot(entry: dict) -> dict:
                 t.unlink()
             except OSError:
                 pass
-    return {**entry, "cache": str(out), "sig": sig_before, "snapshot_ts": int(time.time())}
+    return {**entry, "cache": str(out), "sig": sig_before, "snapshot_ts": int(time.time()), "ident": before}
 
 
 # ── query-time validation ───────────────────────────────────────────────────
@@ -337,6 +343,7 @@ def usable(srcs: dict[str, dict] | None = None, *, persist: bool | None = None) 
         persist = srcs is None  # only the WHOLE registry is written back — never a subset over it
     srcs = load() if srcs is None else {k: _trusted_cache(v) for k, v in srcs.items()}
     allowed, _ = fence.roots(settings.cfg().get("data_dirs"))
+    settings.sync_gap(bool(allowed))
     ok: list[dict] = []
     notes: list[str] = []
     changed = False
@@ -345,7 +352,12 @@ def usable(srcs: dict[str, dict] | None = None, *, persist: bool | None = None) 
         if why:
             notes.append(f"`{name}` skipped: {why}")
             continue
-        s = {**s, "name": name, "path": str(real)}
+        # The file's identity as it passed the fence — compared again after every engine read
+        # (engine.checked_call), so a swap between this check and DuckDB opening it is refused.
+        s = {**s, "name": name, "path": str(real), "ident": fence.identity(real)}
+        if s["ident"] is None:
+            notes.append(f"`{name}` skipped: its file changed while being checked")
+            continue
         if s.get("kind") in SNAPSHOT_KINDS:
             cache = Path(s.get("cache") or "")
             if not cache.is_file() or s.get("sig") != _sig(real):
@@ -361,6 +373,8 @@ def usable(srcs: dict[str, dict] | None = None, *, persist: bool | None = None) 
                 continue
         else:
             s.pop("cache", None)
+        if s.get("cache"):
+            s["cache_ident"] = fence.identity(s["cache"])
         ok.append(s)
     if changed and persist:
         save(srcs)

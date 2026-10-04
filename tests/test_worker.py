@@ -72,7 +72,10 @@ FROM sales LIMIT 1
 def test_values_cross_the_process_boundary_with_their_types(env, worker):
     from data import engine
 
-    srcs = [{"name": "sales", "kind": "csv", "path": str(env["files"]["csv"])}]
+    from data import fence
+
+    path = env["files"]["csv"]
+    srcs = [{"name": "sales", "kind": "csv", "path": str(path), "ident": fence.identity(path)}]
     remote = engine.run_query(srcs, _TYPED, cap=5, timeout_s=20)
 
     import duckdb  # the same query in-process is the oracle
@@ -96,7 +99,10 @@ def test_values_cross_the_process_boundary_with_their_types(env, worker):
 def test_refusals_keep_their_message_through_the_worker(env, worker):
     from data import engine
 
-    srcs = [{"name": "sales", "kind": "csv", "path": str(env["files"]["csv"])}]
+    from data import fence
+
+    path = env["files"]["csv"]
+    srcs = [{"name": "sales", "kind": "csv", "path": str(path), "ident": fence.identity(path)}]
     with pytest.raises(engine.QueryError, match="only SELECT"):
         engine.run_query(srcs, "CREATE TABLE x AS SELECT 1", cap=5, timeout_s=20)
     with pytest.raises(engine.QueryError, match="Refused by the read-only engine"):
