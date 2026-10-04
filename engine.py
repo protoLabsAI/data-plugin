@@ -157,8 +157,40 @@ def referenced(sources: list[dict], sql: str) -> list[dict]:
     return [s for s in sources if re.search(r"(?<![a-z0-9_])" + re.escape(s["name"].lower()) + r"(?![a-z0-9_])", low)]
 
 
+CHANGED = "a source changed during the query — refused"
+
+
+def _read_paths(sources: list[dict]) -> list[tuple[str, list[int] | None]]:
+    """(each file the engine will open, its identity when it passed the fence). A snapshot
+    source reads its Parquet cache, but the origin's identity is checked too."""
+    out = [(str(s["path"]), s.get("ident")) for s in sources]
+    out += [(str(s["cache"]), s.get("cache_ident")) for s in sources if s.get("cache")]
+    return out
+
+
+def _unchanged(expected: list[tuple[str, list[int] | None]]) -> bool:
+    from . import fence
+
+    return all(want is not None and fence.identity(p) == want for p, want in expected)
+
+
+def checked_call(op: str, sources: list[dict], **req: Any) -> Any:
+    """``call`` for an op that reads ``sources`` — and then proves it read what the fence
+    checked. Every source file is re-``lstat``-ed after the engine is done: same dev + inode,
+    still a plain regular file (not a symlink). A file swapped between the fence check and
+    DuckDB opening it (or during the read) fails that, and the result is DISCARDED, never
+    returned. Sources with no recorded identity (not from ``sources.usable``) are refused."""
+    expected = _read_paths(sources)
+    if not _unchanged(expected):
+        raise QueryError(CHANGED)
+    got = call(op, sources=sources, **req)
+    if not _unchanged(expected):
+        raise QueryError(CHANGED)
+    return got
+
+
 def run_query(sources: list[dict], sql: str, *, cap: int, timeout_s: float) -> Result:
-    got = call("query", sources=referenced(sources, sql), sql=sql, cap=int(cap), timeout_s=float(timeout_s))
+    got = checked_call("query", referenced(sources, sql), sql=sql, cap=int(cap), timeout_s=float(timeout_s))
     rows = [tuple(r) for r in got["rows"]]
     return Result(got["columns"], got["types"], rows, bool(got["truncated"]), float(got["elapsed"]))
 
@@ -167,9 +199,9 @@ def export(sources: list[dict], sql: str, out: Path, fmt: str, *, cap: int, time
     """COPY the guarded SELECT to ``out`` (an exact path we chose). Returns rows written."""
     tmp = out.with_name(f".{out.name}.{uuid.uuid4().hex[:8]}.part")
     try:
-        n = call(
+        n = checked_call(
             "export",
-            sources=referenced(sources, sql),
+            referenced(sources, sql),
             sql=sql,
             tmp=str(tmp),
             fmt=fmt,

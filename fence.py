@@ -222,6 +222,21 @@ def dir_problem(raw: str, allowed: list[Path]) -> tuple[str | None, Path | None]
     return None, real
 
 
+def identity(p: Path | str) -> list[int] | None:
+    """``[st_dev, st_ino]`` of ``p`` itself (``lstat`` — a symlink is NOT followed), or None if it
+    is missing, a symlink, or not a regular file. Taken when a source passes the fence and again
+    after the engine read it: a source swapped (for a symlink, or another file) in between is
+    caught, because the path the engine opens is the already-resolved real path, which must
+    still be the very same plain file."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):  # S_ISREG on an lstat is False for a symlink
+        return None
+    return [int(st.st_dev), int(st.st_ino)]
+
+
 def file_problem(raw: str | Path, allowed: list[Path]) -> tuple[str | None, Path | None]:
     """(why file ``raw`` may not be read or None, its resolved path)."""
     p = Path(raw).expanduser()

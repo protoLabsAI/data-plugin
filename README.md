@@ -66,7 +66,10 @@ refuses it). The allowlist is the agent's **default data folder** (`<agent works
 resolved through core's `infra.paths.workspace_dir` — instance-scoped, so every fleet member has
 its own; `use_default_folder: false` turns it off) plus `data_dirs`; with neither, every connect
 is refused. Paths are resolved (symlinks, `..`) *before* the
-containment check, at connect time and again before every query; hardlinked files, credential
+containment check, at connect time and again before every query — and each source's identity
+(device + inode, a plain regular file, not a symlink) is snapshotted at that check and
+re-`lstat`-ed after the engine reads it, so a file swapped in between is refused and the result
+discarded; hardlinked files, credential
 files and dirs (`.env`, `*.pem`, `id_rsa`, `.ssh`, `.aws`, …) and the agent's home are refused even
 inside an allowed folder; a too-broad entry (`/`, your home, the agent's home or a parent) is
 ignored. Point it at folders of data the agent can't write into.
