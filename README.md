@@ -24,7 +24,9 @@ spec to the panel. No hand-written React component, no rows round-tripping throu
    Python runtime — provisioned on first use) and each query runs there in a short-lived worker
    (`duck.py`); on a source/server install it runs in-process. Same engine, same rules.
 2. In *Settings ▸ Plugins ▸ Data Analyst*, set **Data folders** to the folder(s) holding your
-   data, e.g. `/Users/me/Data/coffee-shop`. Only the operator can set this — the agent can't.
+   data, e.g. `/Users/me/Data/coffee-shop`: one row per folder, **Browse…** on each and **Add
+   folder** for another (protoAgent after 0.192.0; an older core shows a single box — separate
+   folders with commas or new lines). Only the operator can set this — the agent can't.
 3. Ask: *"connect ~/Data/coffee-shop — what were my best weekdays last quarter? chart it"*.
 
 ## Tools
@@ -75,7 +77,7 @@ inside any configured data folder is refused.
 
 | Key | Default | |
 |---|---|---|
-| `data_dirs` | `""` | Allowlisted data folders (operator-only). |
+| `data_dirs` | `""` | Allowlisted data folders (operator-only) — a folder list in Settings, stored newline-separated (commas work too). |
 | `row_cap` | 200 | Rows a `data_query` reply shows. |
 | `chart_row_cap` | 5000 | Rows a chart may carry (aggregate in SQL past this). |
 | `timeout_s` | 20 | Per-query time cap, at most 120 s. **Operator-only.** |

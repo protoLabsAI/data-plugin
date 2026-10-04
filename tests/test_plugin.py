@@ -81,3 +81,26 @@ def test_data_dirs_renders_the_folder_picker():
     assert spec["type"] == "path"
     assert spec.get("path_kind", "dir") == "dir"
     assert spec["spawns"] is True
+
+
+def test_data_dirs_is_a_folder_list_without_a_core_floor_bump():
+    """`data_dirs` holds SEVERAL folders, so it opts into core's list control (`multiple: true`:
+    one row + Browse… per folder). The value stays one string that fence.py splits on commas and
+    newlines, and an older core ignores the key (the single path box still edits that string) —
+    so the manifest must NOT raise min_protoagent_version for it."""
+    from pathlib import Path
+
+    from data.fence import parse_dirs
+
+    root = Path(__file__).resolve().parent.parent
+    man = yaml.safe_load((root / "protoagent.plugin.yaml").read_text())
+    spec = next(s for s in man["settings"] if s["key"] == "data_dirs")
+    assert spec["type"] == "path"
+    assert spec.get("path_kind", "dir") == "dir"
+    assert spec["multiple"] is True
+    assert spec["spawns"] is True
+    assert man["min_protoagent_version"] == "0.192.0"
+    assert man["config"]["data_dirs"] == ""
+    # The newline-joined value core's list control saves parses to the same folders as the
+    # comma-separated value an older core's single box holds.
+    assert parse_dirs("/a\n/b") == parse_dirs("/a, /b") == ["/a", "/b"]
