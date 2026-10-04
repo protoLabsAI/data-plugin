@@ -5,7 +5,9 @@ the disk as it is NOW (symlinks resolved first) — at connect time AND again be
 so a file that moved out of the fence (or a ``data_dirs`` entry the operator removed) stops being
 readable without a reconnect. The rules, ported from campaign-plugin's ``upload_dirs`` fence:
 
-* the operator's ``data_dirs`` allowlist; EMPTY (the default) refuses every connect;
+* the operator's ``data_dirs`` allowlist, plus the agent's own DEFAULT data folder
+  (``<agent workspace>/data`` — :func:`default_root`) unless ``use_default_folder`` is off; with
+  neither, every connect is refused;
 * an allowlist entry that is the filesystem root, the home dir or any parent of it, or the agent's
   home (or a parent of it) is ignored — too broad;
 * a file must resolve (symlinks followed) to a regular file INSIDE an allowlisted dir — so a
@@ -14,6 +16,13 @@ readable without a reconnect. The rules, ported from campaign-plugin's ``upload_
   key/credential file names (secrets.yaml, .env, id_rsa, *.pem, …), and anything under the
   protoAgent home (~/.protoagent, $PROTOAGENT_HOME, $PROTOAGENT_BOX_ROOT);
 * hardlinked files (link count > 1) are refused — a hardlink dodges every name check.
+
+The ONE carve-out from the agent-home refusal is the default data folder itself: on a host it
+lives in the agent's workspace, inside the agent home, and files that resolve (symlinks followed)
+into exactly that folder are readable. Nothing else under the home is — a symlink in the default
+folder pointing at the agent's config, secrets or databases resolves OUT of it and is refused. The
+folder is only trusted if it is a real directory (not a symlink — else it could alias the whole
+home) and isn't the filesystem root, a home dir or a parent of one.
 
 Deny checks are case-insensitive and also match by inode (macOS/Windows filesystems are
 case-insensitive); the allowlist compares exactly, so a case variant fails CLOSED there.
@@ -29,6 +38,8 @@ import re
 import stat
 from pathlib import Path
 from typing import Any
+
+from . import paths, settings
 
 SECRET_DIR_NAMES = frozenset(
     {
@@ -104,10 +115,42 @@ def within_any_case(path: Path, root: Path) -> bool:
     return rid is not None and any(_ident(q) == rid for q in (path, *path.parents))
 
 
-def roots(raw: Any) -> tuple[list[Path], list[str]]:
-    """(the usable allowlisted dirs, resolved; a note for each configured entry that isn't)."""
+def default_root(conf: dict | None = None) -> tuple[Path | None, str | None]:
+    """(the agent's default data folder, resolved — or None; why it isn't usable, if it should be).
+
+    Created if missing. Trusted only as a plain directory: if ``<workspace>/data`` were a symlink
+    to the agent home (or ``~``), the carve-out below would hand out the whole of it."""
+    if not settings.flag("use_default_folder", conf):
+        return None, None
+    p = paths.default_data_dir(create=True)
+    if p is None:
+        return None, None
+    if not p.is_absolute():
+        return None, f"default data folder {str(p)!r} is not an absolute path — ignored"
+    try:
+        st = p.lstat()
+        real = p.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None, f"default data folder {str(p)!r} doesn't exist and couldn't be created — ignored"
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return None, f"default data folder {str(p)!r} is not a plain directory (a symlink?) — ignored"
+    home = Path.home().resolve()
+    if real == Path(real.anchor) or any(within_any_case(h, real) for h in (home, *agent_homes())):
+        return None, f"default data folder {str(p)!r} is the filesystem root or contains a home dir — ignored"
+    return real, None
+
+
+def roots(raw: Any, conf: dict | None = None) -> tuple[list[Path], list[str]]:
+    """(the usable allowlisted dirs, resolved — the default data folder first, then ``data_dirs``;
+    a note for each configured entry that isn't usable). ``conf`` judges ``use_default_folder``
+    from that config instead of the live one (register() during a reload)."""
     out: list[Path] = []
     notes: list[str] = []
+    default, note = default_root(conf)
+    if default is not None:
+        out.append(default)
+    if note:
+        notes.append(note)
     home = Path.home().resolve()
     homes = agent_homes()
     for d in parse_dirs(raw):
@@ -127,15 +170,18 @@ def roots(raw: Any) -> tuple[list[Path], list[str]]:
                 f"data_dirs entry {d!r} is the filesystem root, your home dir (or a parent of it), or the "
                 "agent's home — too broad, ignored"
             )
-        else:
+        elif r not in out:
             out.append(r)
     return out, notes
 
 
 def configured_paths(raw: Any) -> list[Path]:
-    """Every configured entry that resolves — usable or not. Exports must avoid ALL of them."""
+    """Every configured entry that resolves — usable or not — plus the default data folder (even
+    when ``use_default_folder`` is off: turning it back on mustn't make old exports sources).
+    Exports must avoid ALL of them."""
     out = []
-    for d in parse_dirs(raw):
+    default = paths.default_data_dir()
+    for d in [*parse_dirs(raw), *([str(default)] if default is not None else [])]:
         try:
             out.append(Path(d).expanduser().resolve())
         except (OSError, RuntimeError):
@@ -150,6 +196,9 @@ def _denied(original: Path, real: Path) -> str | None:
         return "is inside a credentials directory — never read"
     if SECRET_FILE_RE.match(real.name) or SECRET_FILE_RE.match(original.name):
         return "looks like a key or credentials file — never read"
+    default, _ = default_root()
+    if default is not None and within(real, default):
+        return None  # the one carve-out: the agent's own data folder (``real`` is symlink-resolved)
     for h in agent_homes():
         if within_any_case(real, h):
             return f"is inside the agent's home ({h}) — never read"
@@ -199,8 +248,8 @@ def file_problem(raw: str | Path, allowed: list[Path]) -> tuple[str | None, Path
 def _outside(raw: str, allowed: list[Path]) -> str:
     if not allowed:
         return (
-            f"{raw!r} can't be read: no data folders are allowlisted. The operator sets them in {SETTINGS_HINT} "
-            "(the agent can't change that setting)."
+            f"{raw!r} can't be read: no data folders are allowlisted (and the default data folder is off). "
+            f"The operator sets them in {SETTINGS_HINT} (the agent can't change that setting)."
         )
     return (
         f"{raw!r} is outside the allowlisted data folders ({', '.join(str(r) for r in allowed)}) — "

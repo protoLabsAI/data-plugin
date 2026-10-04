@@ -337,6 +337,7 @@ def usable(srcs: dict[str, dict] | None = None, *, persist: bool | None = None) 
         persist = srcs is None  # only the WHOLE registry is written back — never a subset over it
     srcs = load() if srcs is None else {k: _trusted_cache(v) for k, v in srcs.items()}
     allowed, _ = fence.roots(settings.cfg().get("data_dirs"))
+    settings.sync_gap(bool(allowed))
     ok: list[dict] = []
     notes: list[str] = []
     changed = False

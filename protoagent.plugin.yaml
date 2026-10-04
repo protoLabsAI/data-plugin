@@ -1,6 +1,6 @@
 id: data
 name: Data Analyst
-version: 0.1.3
+version: 0.1.4
 description: >-
   Local-first data analysis — your agent, your data, your way. Point the agent at CSV, TSV,
   Parquet, JSON, Excel and SQLite files (or folders of them) inside folders the operator
@@ -40,7 +40,8 @@ requires_pip:
 
 config_section: data
 config:
-  data_dirs: ""             # folders the agent may connect files from (comma/newline separated); blank = none
+  data_dirs: ""             # extra folders the agent may connect files from (comma/newline separated)
+  use_default_folder: true  # also allowlist the agent's own data folder, <workspace>/data (created on load)
   row_cap: 200              # rows a data_query reply shows before truncating
   chart_row_cap: 5000       # rows a data_chart may inline (aggregate in SQL past this)
   timeout_s: 20             # per-query time cap (seconds)
@@ -53,12 +54,15 @@ config:
 # never widen it itself. `timeout_s` and `memory_limit` carry it too: they bound how long a query
 # runs and how much it holds (and spills — spill is also hard-capped at 1 GB), so the agent can't
 # lift them to grind the host. Both are clamped in code as well. Older cores ignore the field.
+# `use_default_folder` carries it too: it's part of the read scope (the agent's own
+# <workspace>/data, the one folder inside the agent home the fence lets it read).
 # `multiple: true` on `data_dirs` (protoAgent after 0.192.0) renders the setting as a list of
 # folders, each with its own Browse…; it is still saved as ONE string (newline-joined), which
 # fence.py already splits on commas and newlines. Older cores ignore the key and show the single
 # path box — same value, so no min_protoagent_version bump.
 settings:
-  - { key: data_dirs, label: "Data folders", type: path, path_kind: dir, multiple: true, spawns: true, group: "Data Analyst", description: "The folders the agent may connect data files from — one row per folder (Browse… on each, Add folder for another; an older protoAgent shows one box: separate folders with commas or new lines) (symlinks resolved; a file must really live inside one). Blank refuses every connect. Credential files and dirs (.env, *.pem, .ssh, …) and the agent's home (~/.protoagent) are refused even inside these; the filesystem root, your home dir or a parent of it, and the agent's home are ignored as too broad. Queries are read-only: nothing in these folders is ever written. Operator-only: the agent can't widen it." }
+  - { key: data_dirs, label: "Data folders", type: path, path_kind: dir, multiple: true, spawns: true, group: "Data Analyst", description: "Optional — the agent already has its own data folder (<workspace>/data; data_sources shows the path), so drop files there or list more folders here, one row per folder (Browse… on each, Add folder for another; an older protoAgent shows one box: separate folders with commas or new lines) (symlinks resolved; a file must really live inside one). Credential files and dirs (.env, *.pem, .ssh, …) and the rest of the agent's home (~/.protoagent) are refused even inside these; the filesystem root, your home dir or a parent of it, and the agent's home are ignored as too broad. Queries are read-only: nothing in these folders is ever written. Operator-only: the agent can't widen it." }
+  - { key: use_default_folder, label: "Use the default data folder", type: bool, spawns: true, group: "Data Analyst", description: "Allowlist the agent's own data folder, <workspace>/data (created on load) — the one folder inside the agent's home it may read; everything else there stays refused. Off: only the Data folders above. Exports never land in it. Operator-only: the agent can't toggle it." }
   - { key: row_cap, label: "Rows per query reply", type: number, group: "Data Analyst", description: "How many rows data_query shows before truncating (the agent is told to aggregate or LIMIT)." }
   - { key: chart_row_cap, label: "Rows per chart", type: number, group: "Data Analyst", description: "Most rows a chart may carry. Past this data_chart refuses and asks for an aggregated query." }
   - { key: timeout_s, label: "Query time limit (s)", type: number, spawns: true, group: "Data Analyst", description: "A query running longer than this is interrupted (at most 120 s). Operator-only: the agent can't raise it." }

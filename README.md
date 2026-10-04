@@ -23,10 +23,15 @@ spec to the panel. No hand-written React component, no rows round-tripping throu
    On the **desktop app** duckdb installs into the managed Python runtime (Settings ▸ Tools ▸
    Python runtime — provisioned on first use) and each query runs there in a short-lived worker
    (`duck.py`); on a source/server install it runs in-process. Same engine, same rules.
-2. In *Settings ▸ Plugins ▸ Data Analyst*, set **Data folders** to the folder(s) holding your
-   data, e.g. `/Users/me/Data/coffee-shop`: one row per folder, **Browse…** on each and **Add
-   folder** for another (protoAgent after 0.192.0; an older core shows a single box — separate
-   folders with commas or new lines). Only the operator can set this — the agent can't.
+2. Put your data somewhere the agent may read. **Every agent already has its own data folder**,
+   `<agent workspace>/data` — created when the plugin loads, always allowlisted; `data_sources`
+   shows its path (on the desktop app it's under
+   `~/Library/Application Support/studio.protolabs.protoagent/workspaces/<id>/workspace/data`).
+   Drop CSV, Excel, Parquet, JSON or SQLite files there and you're done. To read data where it
+   already lives, add folders in *Settings ▸ Plugins ▸ Data Analyst* ▸ **Data folders**, e.g.
+   `/Users/me/Data/coffee-shop`: one row per folder, **Browse…** on each and **Add folder** for
+   another (protoAgent after 0.192.0; an older core shows a single box — separate folders with
+   commas or new lines). Only the operator can set these — the agent can't.
 3. Ask: *"connect ~/Data/coffee-shop — what were my best weekdays last quarter? chart it"*.
 
 ## Tools
@@ -57,11 +62,22 @@ parse — with DuckDB's own parser — to exactly one `SELECT`. Each query is ti
 (interrupted) and row-capped.
 
 **The `data_dirs` fence** (operator-only: marked `spawns: true`, so the agent's `set_config`
-refuses it). Empty refuses every connect. Paths are resolved (symlinks, `..`) *before* the
+refuses it). The allowlist is the agent's **default data folder** (`<agent workspace>/data`,
+resolved through core's `infra.paths.workspace_dir` — instance-scoped, so every fleet member has
+its own; `use_default_folder: false` turns it off) plus `data_dirs`; with neither, every connect
+is refused. Paths are resolved (symlinks, `..`) *before* the
 containment check, at connect time and again before every query; hardlinked files, credential
 files and dirs (`.env`, `*.pem`, `id_rsa`, `.ssh`, `.aws`, …) and the agent's home are refused even
 inside an allowed folder; a too-broad entry (`/`, your home, the agent's home or a parent) is
 ignored. Point it at folders of data the agent can't write into.
+
+The default folder is the **one carve-out** from the agent-home refusal: it lives in the agent's
+workspace, inside its home, and exactly that folder (after symlinks are resolved) is readable.
+The rest of the home — config, `secrets.yaml`, the `*.db` stores, `memory/` — stays refused, so a
+symlink in the default folder pointing into the home is refused, and one pointing elsewhere is
+judged like any outside path (refused unless it's under `data_dirs`). The folder itself must be a
+real directory, not a symlink. It sits in the agent's workspace, so the agent can write there
+too — it can only ever read back what it put there or you dropped in.
 
 **SQLite and Excel** aren't readable by the bundled DuckDB (its sqlite/excel extensions would be a
 network install, which the engine refuses), so each table/sheet is **snapshotted to Parquet** in
@@ -70,14 +86,16 @@ opened read-only (`mode=ro`, falling back to `immutable=1`) and never written. A
 when its file's size or mtime changes.
 
 **Writes** go only to the plugin store (the source registry + snapshots, instance-scoped via
-`sdk.plugin_store`) and the workspace's `data-exports/` folder; an export whose destination is
-inside any configured data folder is refused.
+`sdk.plugin_store`) and the workspace's `data-exports/` folder — a sibling of the default `data/`
+folder, so exports never become sources; an export whose destination is inside the default data
+folder or any configured data folder is refused.
 
 ## Settings
 
 | Key | Default | |
 |---|---|---|
-| `data_dirs` | `""` | Allowlisted data folders (operator-only) — a folder list in Settings, stored newline-separated (commas work too). |
+| `data_dirs` | `""` | Extra allowlisted data folders (operator-only) — a folder list in Settings, stored newline-separated (commas work too). Optional: the default data folder is always there. |
+| `use_default_folder` | `true` | Allowlist the agent's own `<workspace>/data` folder. **Operator-only.** |
 | `row_cap` | 200 | Rows a `data_query` reply shows. |
 | `chart_row_cap` | 5000 | Rows a chart may carry (aggregate in SQL past this). |
 | `timeout_s` | 20 | Per-query time cap, at most 120 s. **Operator-only.** |

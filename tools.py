@@ -34,16 +34,26 @@ def _notes(notes: list[str]) -> str:
 
 
 def _no_sources(notes: list[str]) -> str:
-    """Nothing connected yet — and WHERE the operator said the data lives, so a question like
-    "what were my best weekdays?" can go straight to data_connect instead of asking for a path."""
+    """Nothing connected yet — and WHERE the data can live, so a question like "what were my best
+    weekdays?" can go straight to data_connect instead of asking for a path: the agent's default
+    data folder (files dropped there are readable as-is) and the operator's allowlisted folders."""
     allowed, root_notes = fence.roots(settings.cfg().get("data_dirs"))
-    if allowed:
-        where = (
+    settings.sync_gap(bool(allowed))
+    default, _ = fence.default_root()
+    others = [r for r in allowed if r != default]
+    where = ""
+    if default is not None:
+        where += (
+            f" Drop CSV, Excel, Parquet, JSON or SQLite files into `{default}` (the agent's data folder), "
+            f"or add folders in {fence.SETTINGS_HINT}."
+        )
+    if others:
+        where += (
             " The operator's allowlisted data folders — connect one (or a file inside it): "
-            + ", ".join(f"`{r}`" for r in allowed)
+            + ", ".join(f"`{r}`" for r in others)
             + "."
         )
-    else:
+    if not allowed:
         where = f" No data folders are allowlisted yet — the operator sets them in {fence.SETTINGS_HINT}."
     return "No usable data sources — connect one with data_connect(path)." + where + _notes(notes + root_notes)
 
@@ -55,11 +65,13 @@ def data_connect(path: str, name: str = "") -> str:
     Supported: .csv .tsv .parquet .json/.jsonl/.ndjson .xlsx (one source per sheet) and SQLite
     .sqlite/.sqlite3/.db (one source per table). A folder is walked up to 3 levels deep (≤ 200
     files); each file becomes a named source — a SQL view you can SELECT from. ``name`` names a
-    single-file source (or prefixes a folder's). Only files inside the operator's allowlisted
-    data folders can be connected; credential files and the agent's home never can.
+    single-file source (or prefixes a folder's). Only files inside the agent's data folder or the
+    operator's allowlisted data folders can be connected (data_sources names them); credential
+    files and the rest of the agent's home never can.
     Re-connecting the same file refreshes it. Next: data_schema(source) or data_profile(source).
     """
     allowed, root_notes = fence.roots(settings.cfg().get("data_dirs"))
+    settings.sync_gap(bool(allowed))
     if not allowed:
         return (
             "No data folders are allowlisted, so nothing can be connected. Ask the operator to add the folder "

@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 DEFAULTS: dict[str, Any] = {
     "data_dirs": "",
+    "use_default_folder": True,
     "row_cap": 200,
     "chart_row_cap": 5000,
     "timeout_s": 20,
@@ -31,16 +32,21 @@ def configure(source: Callable[[], dict] | dict | None) -> None:
         _SOURCE = source
 
 
-def cfg() -> dict[str, Any]:
+def merged(conf: dict | None) -> dict[str, Any]:
+    """DEFAULTS ⊕ ``conf``'s set (non-blank) values."""
     out = dict(DEFAULTS)
+    for k, v in (conf or {}).items():
+        if v is not None and v != "":
+            out[k] = v
+    return out
+
+
+def cfg() -> dict[str, Any]:
     try:
         got = _SOURCE() if _SOURCE else {}
     except Exception:  # noqa: BLE001 — a broken host read must not break a tool
         got = {}
-    for k, v in (got or {}).items():
-        if v is not None and v != "":
-            out[k] = v
-    return out
+    return merged(got)
 
 
 # Hard ceilings the engine never exceeds, whatever a setting says. `memory_limit` and `timeout_s`
@@ -123,9 +129,57 @@ def clamp_notes() -> list[str]:
     return out
 
 
+def flag(name: str, conf: dict | None = None) -> bool:
+    """A boolean setting — a real bool, or the strings a YAML hand-edit / form round-trip gives.
+    Read from ``conf`` (merged over DEFAULTS) when given, else the live config."""
+    v = (merged(conf) if conf is not None else cfg()).get(name)
+    if isinstance(v, str):
+        return v.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(v)
+
+
 def int_setting(name: str, lo: int, hi: int) -> int:
     try:
         n = int(float(cfg().get(name)))
     except (TypeError, ValueError):
         n = int(DEFAULTS[name])
     return max(lo, min(hi, n))
+
+
+# ── the "no data folders" setup gap ─────────────────────────────────────────
+# register() reports it, but it must also follow a Settings save: core re-runs register() on
+# Save & apply, yet BEFORE it commits the new config — so inside register() ``live_config()``
+# still returns the OLD values (protoAgent server/agent_init.py ``_reload_langgraph_agent``).
+# register() therefore judges the gap from its registry's fresh ``config`` snapshot, and the
+# tools re-sync it from the live config whenever they compute the allowlist (a reload that
+# reuses the plugin bundle never calls register() at all).
+
+GAP_KEY = "data_dirs"
+GAP_MESSAGE = (
+    "Data Analyst has no data folders — the default data folder is off and Data folders is empty. "
+    "Add the folders the agent may read, or turn the default folder back on."
+)
+_GAP: Callable[..., Any] | None = None
+_GAP_STATE: bool | None = None  # last reported: True = gap raised, False = cleared
+
+
+def set_gap_reporter(fn: Callable[..., Any] | None) -> None:
+    global _GAP, _GAP_STATE
+    _GAP, _GAP_STATE = (fn if callable(fn) else None), None
+
+
+def sync_gap(has_folders: bool) -> None:
+    """Raise or clear the setup gap — only when its state changes (it's called per tool call)."""
+    global _GAP_STATE
+    want = not has_folders
+    if _GAP is None or _GAP_STATE is want:
+        return
+    try:
+        _GAP(
+            GAP_KEY,
+            GAP_MESSAGE if want else None,
+            action={"kind": "plugin_config", "fields": ["data_dirs", "use_default_folder"]},
+        )
+        _GAP_STATE = want
+    except Exception:  # noqa: BLE001 — a banner must never break a tool
+        _log.exception("[data] reporting the setup gap failed")

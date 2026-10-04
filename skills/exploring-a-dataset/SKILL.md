@@ -12,9 +12,11 @@ into the conversation.
 ## The loop
 
 1. **Connect** — `data_connect(path)` for a file or folder. Each file becomes a source (a SQL
-   view); a SQLite database gives one per table, a workbook one per sheet. If it says no folders
-   are allowlisted, tell the operator to add the folder in *Settings ▸ Plugins ▸ Data Analyst ▸
-   Data folders* — you can't change that setting yourself, don't try.
+   view); a SQLite database gives one per table, a workbook one per sheet. Not sure where the
+   data is? `data_sources()` names your own data folder (files the operator drops there are
+   readable) and the allowlisted folders. If a file is outside them, tell the operator to drop it
+   into your data folder or add its folder in *Settings ▸ Plugins ▸ Data Analyst ▸ Data folders*
+   — you can't change that setting yourself, don't try.
 2. **Look before you query** — `data_schema(source)` for columns, types and sample rows;
    `data_profile(source)` before any real analysis (nulls, distinct counts, ranges, skew,
    outliers, the top values of category columns). Note anything odd — a date stored as text, a
