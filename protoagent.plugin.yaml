@@ -1,6 +1,6 @@
 id: data
 name: Data Analyst
-version: 0.1.0
+version: 0.1.1
 description: >-
   Local-first data analysis — your agent, your data, your way. Point the agent at CSV, TSV,
   Parquet, JSON, Excel and SQLite files (or folders of them) inside folders the operator
